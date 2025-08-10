@@ -1,0 +1,1 @@
+P. S. Sastry, G. Santhara, and K. P. Unnikrishnan, “Memory Neural Networks for Identification and Control of Dynamical Systems,” IEEE Trans. on Neural Networks, vo5. 1, no. 2, pp. 306–319, 1994.
