@@ -14,8 +14,26 @@
         .right-panel { width: 50%; background: #f9f9f9; padding: 20px; border-radius: 8px; }
         textarea { width: 100%; padding: 10px; font-size: 14px; }
         .upload-section { margin: 15px 0; }
-        button { background: #003366; color: white; padding: 10px 20px; border: none; border-radius: 5px; cursor: pointer; }
-        button:disabled { background: #aaa; cursor: not-allowed; }
+        
+        /* BUTTON STYLES */
+        #check-btn {
+            background: #aaa; /* initial gray */
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: not-allowed;
+            transition: background 0.3s ease; /* smooth transition */
+        }
+        #check-btn.active {
+            background: teal; /* active teal */
+            cursor: pointer;
+        }
+
+        button:disabled {
+            cursor: not-allowed;
+        }
+
         .hidden { display: none; }
     </style>
 </head>
@@ -31,7 +49,7 @@
     </header>
 
     <main class="main-content">
-        <h1>RefAssist VS AI 😊</h1>
+        <h1>AIRefAssist</h1>
         <div class="content-box">
             <!-- LEFT INFO PANEL -->
             <div class="left-panel">
@@ -49,18 +67,18 @@
             <!-- RIGHT INTERACTIVE PANEL -->
             <div class="right-panel">
                 <form id="ref-form" action="/v1/upload" method="post" enctype="multipart/form-data">
-                    <label for="references"><strong>Copy and paste text</strong></label>
+                    <label for="references"><strong>Copy and paste your references as a bulleted list</strong></label>
                     <textarea name="references" id="references" rows="15" placeholder="Paste references here..."></textarea>
                 
-                    <div class="upload-section">
+                    <!-- <div class="upload-section">
                         <p><strong>OR</strong></p>
                         <input type="file" name="file" accept=".doc,.docx,.tex,.bbl,.txt">
-                    </div>
+                    </div> -->
+                    <br>
                 
                     <button type="submit" id="check-btn">CHECK YOUR REFERENCES</button>
                 </form>
                 
-
                 <div id="loading" class="hidden">⏳ Processing your references...</div>
                 <div id="download-link" class="hidden">
                     ✅ Done! <a id="result-file" href="#">Download Results</a>
@@ -74,7 +92,24 @@
         const loading = document.getElementById("loading");
         const downloadLink = document.getElementById("download-link");
         const resultFile = document.getElementById("result-file");
+        const textarea = document.getElementById("references");
+        const checkBtn = document.getElementById("check-btn");
 
+        // Initialize button as disabled
+        checkBtn.disabled = true;
+
+        // Enable button when textarea has text
+        textarea.addEventListener("input", () => {
+            if (textarea.value.trim().length > 0) {
+                checkBtn.classList.add("active");
+                checkBtn.disabled = false;
+            } else {
+                checkBtn.classList.remove("active");
+                checkBtn.disabled = true;
+            }
+        });
+
+        // Handle form submission
         form.addEventListener("submit", async (e) => {
             e.preventDefault();
             loading.classList.remove("hidden");
