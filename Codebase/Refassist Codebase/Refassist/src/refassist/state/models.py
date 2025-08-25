@@ -14,6 +14,7 @@ class ExtractedModel(BaseModel):
     journal_name: Optional[str] = None
     journal_abbrev: Optional[str] = None
     conference_name: Optional[str] = None
+    verified_journal_abbrev: Optional[str] = None  # NEW FIELD
     volume: Optional[str] = None
     issue: Optional[str] = None
     pages: Optional[str] = None
@@ -55,3 +56,7 @@ class PipelineState(TypedDict, total=False):
     _fp: str
     _fp_history: Set[str]
     _loop_detected: bool
+
+    # NEW KEYS for reference verification
+    _skip_pipeline: Optional[bool]          # True if reference is invalid
+    verification_message: Optional[str]     # Human-readable message about detection

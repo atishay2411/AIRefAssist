@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Tuple
 from ..state import PipelineState
 from ..tools.utils import (
-    normalize_text, authors_to_list, sentence_case, normalize_month_field, fingerprint_state
+    normalize_text, authors_to_list, normalize_month_field, fingerprint_state
 )
 
 def apply_corrections(state: PipelineState) -> PipelineState:
@@ -16,7 +16,7 @@ def apply_corrections(state: PipelineState) -> PipelineState:
             changes.append((k, ex.get(k), bv)); ex[k] = bv
 
     if ex.get("title"):
-        sc = sentence_case(ex["title"])
+        sc = ex["title"]
         if sc != ex["title"]:
             changes.append(("title_sentence_case", ex["title"], sc)); ex["title"] = sc
 

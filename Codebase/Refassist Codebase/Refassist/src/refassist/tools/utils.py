@@ -105,30 +105,39 @@ def format_authors_ieee_list(auths: List[str]) -> str:
         return ", ".join(items[:-1]) + (", and " if len(items) > 1 else "") + items[-1] if len(items) > 1 else items[0]
     return ", ".join(items[:6]) + ", et al."
 
-def sentence_case(title: str) -> str:
-    t = normalize_text(title)
-    if not t: return ""
-    if t.isupper(): t = t.lower()
-    tokens = t.split(); out=[]
-    for i, tok in enumerate(tokens):
-        out.append(tok[:1].upper() + tok[1:].lower() if i == 0 else tok.lower())
-    res = " ".join(out)
-    res = re.sub(r"\bieee\b", "IEEE", res, flags=re.I)
-    return res
+# def sentence_case(title: str) -> str:
+#     t = normalize_text(title)
+#     if not t: return ""
+#     if t.isupper(): t = t.lower()
+#     tokens = t.split(); out=[]
+#     for i, tok in enumerate(tokens):
+#         out.append(tok[:1].upper() + tok[1:].lower() if i == 0 else tok.lower())
+#     res = " ".join(out)
+#     res = re.sub(r"\bieee\b", "IEEE", res, flags=re.I)
+#     return res
+
+# def heuristic_abbrev(fullname: str) -> str:
+#     fullname = normalize_text(fullname)
+#     if not fullname: return ""
+#     tokens = [t for t in re.split(r"[\s,]+", fullname) if t.lower() not in {"on","of","and","the","in","for","to"}]
+#     out=[]
+#     for t in tokens[:8]:
+#         if len(t) <= 4 and t.isupper(): out.append(t)
+#         elif len(t) <= 3: out.append(t.capitalize()+".")
+#         else: out.append(t[:4].capitalize()+".")
+#     return " ".join(out)
 
 def heuristic_abbrev(fullname: str) -> str:
-    fullname = normalize_text(fullname)
-    if not fullname: return ""
-    tokens = [t for t in re.split(r"[\s,]+", fullname) if t.lower() not in {"on","of","and","the","in","for","to"}]
-    out=[]
-    for t in tokens[:8]:
-        if len(t) <= 4 and t.isupper(): out.append(t)
-        elif len(t) <= 3: out.append(t.capitalize()+".")
-        else: out.append(t[:4].capitalize()+".")
-    return " ".join(out)
+    return ""
 
 def format_doi_link(doi: str) -> str:
-    d = normalize_text(doi).lower().replace("doi:","").strip()
+    d = normalize_text(doi).lower().strip()
+    # Strip common prefixes
+    for prefix in ["https://doi.org/", "http://doi.org/", "doi:"]:
+        if d.startswith(prefix):
+            d = d[len(prefix):].strip()
+    # Remove any remaining scheme or slashes
+    d = d.replace("http://", "").replace("https://", "").replace("doi.org/", "").strip()
     return f"https://doi.org/{d}" if d else ""
 
 def normalize_pages(p: str) -> Tuple[str, bool]:

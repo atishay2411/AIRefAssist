@@ -13,9 +13,12 @@ async def parse_extract(state: PipelineState) -> PipelineState:
         "Parse the IEEE-style reference. Return STRICT JSON. Keys among:\n"
         "title, authors (list or string), journal_name, journal_abbrev, conference_name,\n"
         "volume, issue, pages, year, month, doi, publisher, location, edition, isbn, url.\n"
-        "Omit unknown keys. JSON ONLY.\n\n"
+        "Omit unknown or invalid keys.\n"
+        "IMPORTANT: If any extracted field contains extra characters, unexpected full stops, "
+        "or other formatting issues that make it unlikely to be correct, DO NOT extract it. JSON ONLY.\n\n"
         f"Type hint: {rtype}\nReference: {ref}"
     )
+
     parsed = await llm.json(prompt) or {}
     if isinstance(parsed.get("authors"), str): parsed["authors"] = authors_to_list(parsed["authors"])
 

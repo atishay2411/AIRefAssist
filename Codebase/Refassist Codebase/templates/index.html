@@ -6,7 +6,7 @@
     <link rel="stylesheet" href="{{ url_for('static', path='css/styles.css') }}">
     <style>
         body { font-family: Arial, sans-serif; margin: 0; padding: 0; }
-        .header-bar { background: #003366; padding: 10px; }
+        .header-bar { background: black; padding: 10px; }
         .header-bar nav a { color: white; margin-right: 15px; text-decoration: none; }
         .main-content { padding: 20px; }
         .content-box { display: flex; gap: 30px; }
@@ -51,14 +51,15 @@
                 <form id="ref-form" action="/v1/upload" method="post" enctype="multipart/form-data">
                     <label for="references"><strong>Copy and paste text</strong></label>
                     <textarea name="references" id="references" rows="15" placeholder="Paste references here..."></textarea>
-
+                
                     <div class="upload-section">
                         <p><strong>OR</strong></p>
                         <input type="file" name="file" accept=".doc,.docx,.tex,.bbl,.txt">
                     </div>
-
+                
                     <button type="submit" id="check-btn">CHECK YOUR REFERENCES</button>
                 </form>
+                
 
                 <div id="loading" class="hidden">⏳ Processing your references...</div>
                 <div id="download-link" class="hidden">

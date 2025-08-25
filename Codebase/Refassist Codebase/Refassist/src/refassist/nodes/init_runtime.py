@@ -25,8 +25,12 @@ async def init_runtime(state: PipelineState) -> PipelineState:
         ArxivClient(cfg, client=http, limiter=limiter, cache=cache),
     ]
     state.update({
-        "_cfg": cfg, "_llm": llm, "_http": http, "_cache": cache,
-        "_limiter": limiter, "_sources": sources,
+        "_cfg": cfg,
+        "_llm": llm,
+        "_http": http,
+        "_cache": cache,
+        "_limiter": limiter,
+        "_sources": sources,
         "hops": state.get("hops", 0),
         "attempts": state.get("attempts", 0),
         "_ver_score": state.get("_ver_score", -1),
@@ -35,5 +39,9 @@ async def init_runtime(state: PipelineState) -> PipelineState:
         "_fp_history": state.get("_fp_history", set()),
         "_loop_detected": False,
         "_made_changes_last_cycle": False,
+        # NEW KEYS for reference verification
+        "_skip_pipeline": False,
+        "verification_message": "",
     })
     return state
+

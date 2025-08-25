@@ -5,11 +5,15 @@ from ..tools.utils import (
     heuristic_abbrev, token_similarity, authors_to_list, normalize_text, normalize_month_field, fingerprint_state
 )
 
-def _prefer_abbrev(a: str, b: str) -> str:
-    cand = [x for x in [a, b] if x]
-    if not cand: return ""
-    def score(x): s=x.strip(); return (sum(1 for c in s if c.isupper()), -len(s))
-    return sorted(cand, key=score, reverse=True)[0]
+# def _prefer_abbrev(a: str, b: str) -> str:
+#     cand = [x for x in [a, b] if x]
+#     if not cand: return ""
+#     def score(x): s=x.strip(); return (sum(1 for c in s if c.isupper()), -len(s))
+#     return sorted(cand, key=score, reverse=True)[0]
+
+def _prefer_abbrev(be_ab: str, fallback: str) -> str:
+    if be_ab: return be_ab  # Prioritize source abbreviation
+    return fallback
 
 def agent_journal(extracted, best):
     ex_j = normalize_text(extracted.get("journal_name") or "")
@@ -42,10 +46,10 @@ def agent_authors(extracted, best):
     return {"ok": bool(ex)}
 
 def agent_title(extracted, best):
-    from ..tools.utils import sentence_case
+    # from ..tools.utils import sentence_case
     ex_t = normalize_text(extracted.get("title") or "")
     be_t = normalize_text(best.get("title") or "")
-    desired = sentence_case(ex_t) if ex_t else ""
+    desired = ex_t if ex_t else ""
     if be_t:
         sim = token_similarity(ex_t, be_t)
         if sim >= 0.7:
@@ -132,3 +136,4 @@ def verify_agents(state: PipelineState) -> PipelineState:
     state["_fp_history"] = hist
     state["_fp"] = fp
     return state
+

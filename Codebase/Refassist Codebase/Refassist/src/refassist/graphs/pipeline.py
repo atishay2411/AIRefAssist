@@ -6,13 +6,18 @@ from ..nodes import (
     verify_agents, apply_corrections, llm_correct, enrich_from_best,
     format_reference, build_exports, build_report, cleanup, route_after_verify
 )
+from ..nodes.validate_reference import validate_input_reference
+from ..nodes.verify_journal_abbrev import verify_journal_abbrev
 
 def build_graph(cfg: PipelineConfig = PipelineConfig()) -> StateGraph:
     g = StateGraph(PipelineState)
 
+    # Nodes
     g.add_node("InitRuntime", init_runtime)
+    g.add_node("VerifyReferenceType", validate_input_reference)
     g.add_node("DetectType", detect_type)
     g.add_node("ParseExtract", parse_extract)
+    g.add_node("VerifyJournalAbbrev", verify_journal_abbrev)  # NEW placement
     g.add_node("MultiSourceLookup", multisource_lookup)
     g.add_node("SelectBest", select_best)
     g.add_node("VerifyAgents", verify_agents)
@@ -24,10 +29,23 @@ def build_graph(cfg: PipelineConfig = PipelineConfig()) -> StateGraph:
     g.add_node("BuildReport", build_report)
     g.add_node("Cleanup", cleanup)
 
+    # Edges
     g.add_edge(START, "InitRuntime")
-    g.add_edge("InitRuntime", "DetectType")
+    g.add_edge("InitRuntime", "VerifyReferenceType")
+
+    # Conditional flow: if valid reference, continue; if invalid, jump to BuildReport
+    g.add_conditional_edges(
+        "VerifyReferenceType",
+        lambda s: "DetectType" if not s.get("_skip_pipeline") else "BuildReport",
+        {
+            "DetectType": "DetectType",
+            "BuildReport": "BuildReport",
+        },
+    )
+
     g.add_edge("DetectType", "ParseExtract")
-    g.add_edge("ParseExtract", "MultiSourceLookup")
+    g.add_edge("ParseExtract", "VerifyJournalAbbrev")  # NEW edge
+    g.add_edge("VerifyJournalAbbrev", "MultiSourceLookup")  # NEW edge
     g.add_edge("MultiSourceLookup", "SelectBest")
     g.add_edge("SelectBest", "VerifyAgents")
 
@@ -46,7 +64,34 @@ def build_graph(cfg: PipelineConfig = PipelineConfig()) -> StateGraph:
     g.add_edge("Cleanup", END)
     return g
 
+
+# async def run_one(reference: str, cfg: PipelineConfig = PipelineConfig(), recursion_limit: int | None = None):
+#     graph = build_graph(cfg).compile()
+#     state: PipelineState = {
+#         "reference": reference,
+#         "_cfg": cfg,
+#         "_skip_pipeline": False,            # initialize new key
+#         "verification_message": ""          # initialize new key
+#     }
+#     return await graph.ainvoke(state, config={"recursion_limit": recursion_limit or cfg.recursion_limit})
+
+
+from pathlib import Path
+
 async def run_one(reference: str, cfg: PipelineConfig = PipelineConfig(), recursion_limit: int | None = None):
-    graph = build_graph(cfg).compile()
+    # Build and compile the graph
+    compiled = build_graph(cfg).compile()
+    
+    # Get PNG bytes
+    png_bytes = compiled.get_graph().draw_mermaid_png()
+    
+    # Save to file
+    graph_path = Path("pipeline_graph.png")
+    graph_path.write_bytes(png_bytes)
+    print(f"Graph saved to: {graph_path.resolve()}")
+    
+    # Prepare the initial state
     state: PipelineState = {"reference": reference, "_cfg": cfg}
-    return await graph.ainvoke(state, config={"recursion_limit": recursion_limit or cfg.recursion_limit})
+    
+    # Run the graph asynchronously
+    return await compiled.ainvoke(state, config={"recursion_limit": recursion_limit or cfg.recursion_limit})
