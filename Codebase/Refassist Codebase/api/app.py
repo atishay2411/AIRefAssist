@@ -78,7 +78,8 @@ async def process_references(refs: List[str]) -> Tuple[List[str], Document]:
                 "idx": idx,
                 "original": ref,
                 "formatted": formatted,
-                "report": out.get("report", "No changes")
+                "report": out.get("report", "No changes"),
+                "matching_fields": out.get("matching_fields", [])  # NEW: Include matching fields
             }
             return formatted, report_entry
         except Exception as e:
@@ -87,7 +88,8 @@ async def process_references(refs: List[str]) -> Tuple[List[str], Document]:
                 "idx": idx,
                 "original": ref,
                 "formatted": None,
-                "report": f"Error: {str(e)}"
+                "report": f"Error: {str(e)}",
+                "matching_fields": []
             }
 
     tasks = [process_single(i + 1, ref) for i, ref in enumerate(refs)]
@@ -99,6 +101,7 @@ async def process_references(refs: List[str]) -> Tuple[List[str], Document]:
         report_doc.add_paragraph(f"Original: {entry['original']}")
         if entry['formatted']:
             report_doc.add_paragraph(f"Processed: {entry['formatted']}")
+        report_doc.add_paragraph(f"Matching Fields: {', '.join(entry['matching_fields']) if entry['matching_fields'] else 'None'}")
         report_doc.add_paragraph(entry['report'])
 
     return formatted_refs, report_doc
