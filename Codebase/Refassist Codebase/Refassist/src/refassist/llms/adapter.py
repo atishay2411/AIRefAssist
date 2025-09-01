@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 from ..config import PipelineConfig
 from ..logging import logger
 from ..tools.utils import safe_json_load, DEFAULT_UA
@@ -10,7 +10,8 @@ except Exception:
     httpx = None
 
 class LLMAdapter:
-    """LLM JSON-mode adapter supporting OpenAI, Azure OpenAI, Anthropic, Ollama; falls back to dummy."""
+    """LLM adapter supporting OpenAI, Azure OpenAI, Anthropic, Ollama.
+       Provides .json(prompt) and .text(prompt) convenience methods."""
     def __init__(self, cfg: PipelineConfig):
         self.cfg = cfg
         self.provider = self._auto_provider(cfg.llm_provider)
@@ -49,6 +50,7 @@ class LLMAdapter:
             self._client = None
             self.provider = "dummy"
 
+    # ---------- JSON mode ----------
     async def _openai_json(self, prompt: str) -> str:
         model = self.cfg.openai_model
         resp = self._client.chat.completions.create(
@@ -97,3 +99,60 @@ class LLMAdapter:
         except Exception as e:
             logger.warning("LLM json() failed: %s", e)
             return {}
+
+    # ---------- TEXT mode (for formatted references) ----------
+    async def _openai_text(self, prompt: str) -> str:
+        model = self.cfg.openai_model
+        resp = self._client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role":"system","content":"You are a precise formatter. Output plain text only."},
+                {"role":"user","content":prompt}
+            ],
+            temperature=0.1, top_p=0.1,
+        )
+        return resp.choices[0].message.content or ""
+
+    async def _azure_text(self, prompt: str) -> str:
+        deployment = os.getenv("AZURE_OPENAI_DEPLOYMENT") or self.cfg.openai_model
+        resp = self._client.chat.completions.create(
+            model=deployment,
+            messages=[
+                {"role":"system","content":"You are a precise formatter. Output plain text only."},
+                {"role":"user","content":prompt}
+            ],
+            temperature=0.1, top_p=0.1,
+        )
+        return resp.choices[0].message.content or ""
+
+    async def _anthropic_text(self, prompt: str) -> str:
+        msg = await self._client.messages.create(
+            model=os.getenv("ANTHROPIC_MODEL","claude-3-5-sonnet-20240620"),
+            system="You are a precise formatter. Output plain text only.",
+            max_tokens=1024, temperature=0.1,
+            messages=[{"role":"user","content":prompt}],
+        )
+        texts = []
+        for c in msg.content:
+            if getattr(c, "type", None) == "text":
+                texts.append(c.text)
+        return "".join(texts)
+
+    async def _ollama_text(self, prompt: str) -> str:
+        if not self._client:
+            return ""
+        data = {"model": self.cfg.ollama_model, "prompt": prompt, "stream": False}
+        r = await self._client.post("/api/generate", json=data)
+        r.raise_for_status()
+        return r.json().get("response","")
+
+    async def text(self, prompt: str) -> str:
+        try:
+            if self.provider == "openai": return await self._openai_text(prompt)
+            elif self.provider == "azure": return await self._azure_text(prompt)
+            elif self.provider == "anthropic": return await self._anthropic_text(prompt)
+            elif self.provider == "ollama": return await self._ollama_text(prompt)
+            else: return ""
+        except Exception as e:
+            logger.warning("LLM text() failed: %s", e)
+            return ""

@@ -14,6 +14,7 @@ class ExtractedModel(BaseModel):
     journal_name: Optional[str] = None
     journal_abbrev: Optional[str] = None
     conference_name: Optional[str] = None
+    verified_journal_abbrev: Optional[str] = None
     volume: Optional[str] = None
     issue: Optional[str] = None
     pages: Optional[str] = None
@@ -55,3 +56,6 @@ class PipelineState(TypedDict, total=False):
     _fp: str
     _fp_history: Set[str]
     _loop_detected: bool
+    _skip_pipeline: Optional[bool]
+    verification_message: Optional[str]
+    matching_fields: List[str]  # NEW: List of fields that matched the best candidate

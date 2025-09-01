@@ -1,5 +1,6 @@
 import re, json, hashlib
 from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime
 
 DEFAULT_UA = "ieee-ref-agent/1.0 (mailto:you@example.com)"
 SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
@@ -12,6 +13,8 @@ except Exception:
     fuzz = None
     RF_AVAILABLE = False
 
+_THIS_YEAR = datetime.utcnow().year
+
 def safe_json_load(s: Any) -> Optional[Dict[str, Any]]:
     if s is None: return None
     if isinstance(s, dict): return s
@@ -20,7 +23,6 @@ def safe_json_load(s: Any) -> Optional[Dict[str, Any]]:
     try:
         if sx.startswith("{"): return json.loads(sx)
     except Exception: ...
-    # brace-balanced extraction
     i, n = 0, len(sx)
     while i < n and sx[i] != "{": i += 1
     if i >= n: return None
@@ -105,30 +107,15 @@ def format_authors_ieee_list(auths: List[str]) -> str:
         return ", ".join(items[:-1]) + (", and " if len(items) > 1 else "") + items[-1] if len(items) > 1 else items[0]
     return ", ".join(items[:6]) + ", et al."
 
-def sentence_case(title: str) -> str:
-    t = normalize_text(title)
-    if not t: return ""
-    if t.isupper(): t = t.lower()
-    tokens = t.split(); out=[]
-    for i, tok in enumerate(tokens):
-        out.append(tok[:1].upper() + tok[1:].lower() if i == 0 else tok.lower())
-    res = " ".join(out)
-    res = re.sub(r"\bieee\b", "IEEE", res, flags=re.I)
-    return res
-
 def heuristic_abbrev(fullname: str) -> str:
-    fullname = normalize_text(fullname)
-    if not fullname: return ""
-    tokens = [t for t in re.split(r"[\s,]+", fullname) if t.lower() not in {"on","of","and","the","in","for","to"}]
-    out=[]
-    for t in tokens[:8]:
-        if len(t) <= 4 and t.isupper(): out.append(t)
-        elif len(t) <= 3: out.append(t.capitalize()+".")
-        else: out.append(t[:4].capitalize()+".")
-    return " ".join(out)
+    return ""
 
 def format_doi_link(doi: str) -> str:
-    d = normalize_text(doi).lower().replace("doi:","").strip()
+    d = normalize_text(doi).lower().strip()
+    for prefix in ["https://doi.org/", "http://doi.org/", "doi:"]:
+        if d.startswith(prefix):
+            d = d[len(prefix):].strip()
+    d = d.replace("http://", "").replace("https://", "").replace("doi.org/", "").strip()
     return f"https://doi.org/{d}" if d else ""
 
 def normalize_pages(p: str) -> Tuple[str, bool]:
@@ -157,3 +144,18 @@ def safe_str(v: Any) -> str:
         return str(v).strip()
     except Exception:
         return ""
+
+# ---- NEW: stronger year helpers ----
+def is_plausible_year(y: Any) -> bool:
+    try:
+        yi = int(str(y).strip()[:4])
+    except Exception:
+        return False
+    return 1800 <= yi <= (_THIS_YEAR + 1)
+
+def coerce_year(y: Any) -> str:
+    s = normalize_text(y)
+    if not s: return ""
+    m = re.search(r"\b(1[89]\d{2}|20\d{2})\b", s)
+    if not m: return ""
+    return m.group(1)

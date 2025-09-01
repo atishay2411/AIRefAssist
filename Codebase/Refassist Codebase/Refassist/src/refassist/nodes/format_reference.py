@@ -1,6 +1,6 @@
 from ..state import PipelineState
 from ..tools.utils import (
-  authors_to_list, format_authors_ieee_list, sentence_case,
+  authors_to_list, format_authors_ieee_list,
   normalize_text, normalize_pages, normalize_month_field,
   MONTHS_NAME, format_doi_link
 )
@@ -10,7 +10,7 @@ def format_reference(state: PipelineState) -> PipelineState:
     A = authors_to_list(ex.get("authors") or [])
     A_fmt = format_authors_ieee_list(A)
     title_raw = ex.get("title") or ""
-    title = sentence_case(title_raw)
+    title = title_raw
     journal = ex.get("journal_abbrev") or ex.get("journal_name") or ""
     vol = normalize_text(ex.get("volume") or "")
     issue = normalize_text(ex.get("issue") or "")
