@@ -8,6 +8,18 @@ from ..nodes import (
 )
 from ..nodes.validate_reference import validate_input_reference
 from ..nodes.verify_journal_abbrev import verify_journal_abbrev
+from ..nodes.llm_format import llm_format  # NEW
+
+# ------------------------------
+# Internal helpers
+# ------------------------------
+
+def _has_llm_formatted(state: PipelineState) -> bool:
+    s = (state.get("formatted") or "").strip()
+    return bool(s) and (len(s) > 10)
+
+# Cache a compiled graph so we don't rebuild it on every request.
+_COMPILED = None
 
 def build_graph(cfg: PipelineConfig = PipelineConfig()) -> StateGraph:
     g = StateGraph(PipelineState)
@@ -17,14 +29,15 @@ def build_graph(cfg: PipelineConfig = PipelineConfig()) -> StateGraph:
     g.add_node("VerifyReferenceType", validate_input_reference)
     g.add_node("DetectType", detect_type)
     g.add_node("ParseExtract", parse_extract)
-    g.add_node("VerifyJournalAbbrev", verify_journal_abbrev)  # NEW placement
+    g.add_node("VerifyJournalAbbrev", verify_journal_abbrev)  # async-safe
     g.add_node("MultiSourceLookup", multisource_lookup)
     g.add_node("SelectBest", select_best)
     g.add_node("VerifyAgents", verify_agents)
     g.add_node("ApplyCorrections", apply_corrections)
     g.add_node("LLMCorrect", llm_correct)
     g.add_node("EnrichFromBest", enrich_from_best)
-    g.add_node("FormatReference", format_reference)
+    g.add_node("LLMFormat", llm_format)             # NEW: LLM-first formatter
+    g.add_node("FormatReference", format_reference)  # Fallback rules
     g.add_node("BuildExports", build_exports)
     g.add_node("BuildReport", build_report)
     g.add_node("Cleanup", cleanup)
@@ -33,24 +46,21 @@ def build_graph(cfg: PipelineConfig = PipelineConfig()) -> StateGraph:
     g.add_edge(START, "InitRuntime")
     g.add_edge("InitRuntime", "VerifyReferenceType")
 
-    # Conditional flow: if valid reference, continue; if invalid, jump to BuildReport
     g.add_conditional_edges(
         "VerifyReferenceType",
         lambda s: "DetectType" if not s.get("_skip_pipeline") else "BuildReport",
-        {
-            "DetectType": "DetectType",
-            "BuildReport": "BuildReport",
-        },
+        {"DetectType": "DetectType", "BuildReport": "BuildReport"},
     )
 
     g.add_edge("DetectType", "ParseExtract")
-    g.add_edge("ParseExtract", "VerifyJournalAbbrev")  # NEW edge
-    g.add_edge("VerifyJournalAbbrev", "MultiSourceLookup")  # NEW edge
+    g.add_edge("ParseExtract", "VerifyJournalAbbrev")
+    g.add_edge("VerifyJournalAbbrev", "MultiSourceLookup")
     g.add_edge("MultiSourceLookup", "SelectBest")
     g.add_edge("SelectBest", "VerifyAgents")
 
+    # After verification, either exit to formatting or continue corrections
     g.add_conditional_edges("VerifyAgents", route_after_verify, {
-        "FormatReference": "FormatReference",
+        "FormatReference": "LLMFormat",   # try LLM formatter first
         "ApplyCorrections": "ApplyCorrections",
     })
 
@@ -58,40 +68,31 @@ def build_graph(cfg: PipelineConfig = PipelineConfig()) -> StateGraph:
     g.add_edge("LLMCorrect", "EnrichFromBest")
     g.add_edge("EnrichFromBest", "MultiSourceLookup")
 
+    # If LLM formatting failed, fallback to rule-based formatter
+    g.add_conditional_edges(
+        "LLMFormat",
+        lambda s: "BuildExports" if _has_llm_formatted(s) else "FormatReference",
+        {"BuildExports":"BuildExports", "FormatReference":"FormatReference"},
+    )
+
     g.add_edge("FormatReference", "BuildExports")
     g.add_edge("BuildExports", "BuildReport")
     g.add_edge("BuildReport", "Cleanup")
     g.add_edge("Cleanup", END)
     return g
 
-
-# async def run_one(reference: str, cfg: PipelineConfig = PipelineConfig(), recursion_limit: int | None = None):
-#     graph = build_graph(cfg).compile()
-#     state: PipelineState = {
-#         "reference": reference,
-#         "_cfg": cfg,
-#         "_skip_pipeline": False,            # initialize new key
-#         "verification_message": ""          # initialize new key
-#     }
-#     return await graph.ainvoke(state, config={"recursion_limit": recursion_limit or cfg.recursion_limit})
-
-
-from pathlib import Path
-
 async def run_one(reference: str, cfg: PipelineConfig = PipelineConfig(), recursion_limit: int | None = None):
-    # Build and compile the graph
-    compiled = build_graph(cfg).compile()
-    
-    # Get PNG bytes
-    png_bytes = compiled.get_graph().draw_mermaid_png()
-    
-    # Save to file
-    graph_path = Path("pipeline_graph.png")
-    graph_path.write_bytes(png_bytes)
-    print(f"Graph saved to: {graph_path.resolve()}")
-    
-    # Prepare the initial state
+    """
+    Execute the pipeline for a single reference.
+    - Uses a module-level compiled graph (no re-compilation per call).
+    - Does NOT render/emit Mermaid PNGs (removes I/O overhead).
+    """
+    global _COMPILED
+    if _COMPILED is None:
+        _COMPILED = build_graph(cfg).compile()
+
     state: PipelineState = {"reference": reference, "_cfg": cfg}
-    
-    # Run the graph asynchronously
-    return await compiled.ainvoke(state, config={"recursion_limit": recursion_limit or cfg.recursion_limit})
+    return await _COMPILED.ainvoke(
+        state,
+        config={"recursion_limit": recursion_limit or cfg.recursion_limit}
+    )

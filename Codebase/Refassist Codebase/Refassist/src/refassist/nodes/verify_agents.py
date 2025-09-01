@@ -40,19 +40,22 @@ def agent_authors(extracted, best):
     be = authors_to_list(best.get("authors", []))
     if not be:
         return {"ok": bool(ex), "correction": None}
-    
-    # Normalize and compare author lists (ordered comparison)
-    ex_normalized = [normalize_author_name(a) for a in ex if normalize_author_name(a)]
-    be_normalized = [normalize_author_name(a) for a in be if normalize_author_name(a)]
-    if not ex_normalized or not be_normalized:
-        return {"ok": bool(ex_normalized), "correction": {"authors": be} if be else None}
-    
-    # Check exact match of ordered lists
-    match_ratio = sum(1 for a, b in zip(ex_normalized, be_normalized) if a == b) / max(len(ex_normalized), len(be_normalized))
-    if match_ratio >= 0.9 and len(ex_normalized) == len(be_normalized):
+
+    def norm_list(L):
+        return [normalize_author_name(a) for a in L if normalize_author_name(a)]
+
+    exn, ben = norm_list(ex), norm_list(be)
+    if not exn or not ben:
+        return {"ok": False, "correction": {"authors": be} if be else None}
+
+    # exact list equality after normalization (ordered)
+    if exn == ben:
         return {"ok": True, "correction": None}
-    
-    # Suggest correction if order or names differ
+
+    # allow minor order differences: if sets equal and length equal, still suggest canonical be
+    if len(exn) == len(ben) and set(exn) == set(ben):
+        return {"ok": True, "correction": {"authors": be}}
+
     return {"ok": False, "correction": {"authors": be}}
 
 def agent_title(extracted, best):
@@ -60,7 +63,7 @@ def agent_title(extracted, best):
     be_t = normalize_text(best.get("title", ""))
     if be_t:
         sim = token_similarity(ex_t, be_t)
-        if sim >= 0.9:
+        if sim >= 0.82:
             return {"ok": True}
         return {"ok": False, "correction": {"title": be_t}}
     return {"ok": bool(ex_t)}
@@ -111,7 +114,6 @@ def verify_agents(state: PipelineState) -> PipelineState:
     for name, out in results.items():
         if out.get("correction"):
             for k, v in out["correction"].items():
-                # Apply correction even if field is in matching_fields to ensure authors are corrected
                 if k == "authors" or k not in matching_fields:
                     suggestions[k] = v
 

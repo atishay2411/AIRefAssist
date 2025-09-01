@@ -1,121 +1,186 @@
+from collections import Counter, defaultdict
+from typing import Dict, List, Tuple, Optional
 from ..state import PipelineState
 from ..tools.scoring import score_candidate, is_trustworthy_match
-from ..tools.utils import normalize_text, token_similarity, authors_to_list
+from ..tools.utils import normalize_text, token_similarity, authors_to_list, is_plausible_year, coerce_year
 
-def normalize_author_name(author: str) -> str:
-    """Normalize author name by keeping initials and surname, removing extra spaces, and converting to lowercase."""
+def _norm_author(author: str) -> str:
     parts = author.strip().split()
-    if not parts:
-        return ""
-    # Keep initials (e.g., 'J.' or 'J') and surname, ignore invalid entries like 'et al.'
-    if parts[-1].lower() in ['al.', 'et', 'et.']:
-        return ""
-    initials = [p for p in parts[:-1] if p[0].isalpha() and (len(p) == 1 or p.endswith('.'))]
-    surname = parts[-1] if parts[-1][0].isalpha() else ""
-    return " ".join(initials + [surname]).lower().strip()
+    if not parts: return ""
+    if parts[-1].lower() in {"al.", "et", "et."}: return ""
+    initials = [p[0].upper()+"." for p in parts[:-1] if p and p[0].isalpha()]
+    surname = parts[-1] if parts[-1] and parts[-1][0].isalpha() else ""
+    return (" ".join(initials + [surname])).strip().lower()
 
-def count_matching_fields(ex: dict, cand: dict) -> tuple[int, list[str]]:
-    """Count matching fields between extracted and candidate with strict author matching."""
-    fields_to_compare = ["title", "authors", "year", "journal_name", "volume", "issue", "pages", "doi"]
-    matches = 0
-    matching_fields = []
+def _title_sim(a: str, b: str) -> float:
+    return token_similarity(normalize_text(a), normalize_text(b))
 
-    # Title match (stricter threshold)
-    ex_title = normalize_text(ex.get("title", ""))
-    cand_title = normalize_text(cand.get("title", ""))
-    if ex_title and cand_title and token_similarity(ex_title, cand_title) >= 0.9:
-        matches += 1
-        matching_fields.append("title")
+def _cluster_by_title(cands: List[Dict]) -> List[List[Dict]]:
+    clusters: List[List[Dict]] = []
+    THRESH = 0.82
+    for c in cands:
+        placed = False
+        for cl in clusters:
+            if _title_sim(c.get("title",""), cl[0].get("title","")) >= THRESH:
+                cl.append(c); placed=True; break
+        if not placed:
+            clusters.append([c])
+    return clusters
 
-    # Authors match (strict: require exact or near-exact list match)
-    ex_authors = [normalize_author_name(a) for a in authors_to_list(ex.get("authors", [])) if normalize_author_name(a)]
-    cand_authors = [normalize_author_name(a) for a in authors_to_list(cand.get("authors", [])) if normalize_author_name(a)]
-    if ex_authors and cand_authors:
-        # Compare ordered lists to account for order
-        match_ratio = sum(1 for a, b in zip(ex_authors, cand_authors) if a == b) / max(len(ex_authors), len(cand_authors))
-        if match_ratio >= 0.9 and len(ex_authors) == len(cand_authors):
-            matches += 1
-            matching_fields.append("authors")
+def _w(src: str) -> float:
+    return {"crossref":1.0,"openalex":0.8,"semanticscholar":0.6,"pubmed":0.55,"arxiv":0.4}.get((src or "").lower(), 0.2)
 
-    # Year match
-    ex_year = normalize_text(str(ex.get("year", "")))
-    cand_year = normalize_text(str(cand.get("year", "")))
-    if ex_year and cand_year and ex_year == cand_year:
-        matches += 1
-        matching_fields.append("year")
+def _vote_field(cl: List[Dict], key: str) -> Tuple[str, float, Optional[str]]:
+    bucket: Dict[str, float] = defaultdict(float)
+    source_for: Dict[str, str] = {}
+    for c in cl:
+        v = normalize_text(c.get(key, ""))
+        if not v: continue
+        w = _w(c.get("source"))
+        bucket[v] += w
+        # keep first strongest source label for audit
+        if v not in source_for or w > _w(source_for.get(v,"")):
+            source_for[v] = c.get("source")
+    if not bucket: return "", 0.0, None
+    best_val, best_w = max(bucket.items(), key=lambda kv: kv[1])
+    return best_val, best_w, source_for.get(best_val)
 
-    # Journal name match
-    ex_journal = normalize_text(ex.get("journal_name", ""))
-    cand_journal = normalize_text(cand.get("journal_name", ""))
-    if ex_journal and cand_journal and token_similarity(ex_journal, cand_journal) >= 0.8:
-        matches += 1
-        matching_fields.append("journal_name")
+def _vote_authors(cl: List[Dict]) -> Tuple[List[str], float, Optional[str]]:
+    bucket: Dict[Tuple[str,...], float] = defaultdict(float)
+    raw_map: Dict[Tuple[str,...], List[str]] = {}
+    src_map: Dict[Tuple[str,...], str] = {}
+    for c in cl:
+        raw = authors_to_list(c.get("authors", []))
+        norm = tuple(a for a in [_norm_author(a) for a in raw] if a)
+        if not norm: continue
+        w = _w(c.get("source"))
+        bucket[norm] += w
+        if norm not in raw_map or len(raw_map[norm]) < len(raw):
+            raw_map[norm] = raw
+            src_map[norm] = c.get("source")
+    if not bucket: return [], 0.0, None
+    norm_best, w = max(bucket.items(), key=lambda kv: kv[1])
+    return raw_map.get(norm_best, list(norm_best)), w, src_map.get(norm_best)
 
-    # Volume match
-    ex_volume = normalize_text(ex.get("volume", ""))
-    cand_volume = normalize_text(cand.get("volume", ""))
-    if ex_volume and cand_volume and ex_volume == cand_volume:
-        matches += 1
-        matching_fields.append("volume")
+def _has_any_doi_agreement(cluster: List[Dict]) -> str:
+    dois = [normalize_text(c.get("doi","")).lower().replace("doi:","") for c in cluster if c.get("doi")]
+    dois = [d for d in dois if d]
+    if not dois: return ""
+    c = Counter(dois)
+    doi, cnt = c.most_common(1)[0]
+    if cnt >= 2 or any((ci.get("source") in {"crossref","openalex"} and normalize_text(ci.get("doi")).lower().replace("doi:","")==doi) for ci in cluster):
+        return doi
+    return ""
 
-    # Issue match
-    ex_issue = normalize_text(ex.get("issue", ""))
-    cand_issue = normalize_text(cand.get("issue", ""))
-    if ex_issue and cand_issue and ex_issue == cand_issue:
-        matches += 1
-        matching_fields.append("issue")
+def _best_year(cl: List[Dict]) -> Tuple[str, str]:
+    """
+    Choose year with strong tie-break:
+    1) Crossref year if plausible (from any of issued/published-* we normalized into 'year')
+    2) OpenAlex
+    3) SemanticScholar
+    4) PubMed
+    Otherwise modal plausible year.
+    Returns (year, provenance_source)
+    """
+    by_src: Dict[str, List[str]] = defaultdict(list)
+    for c in cl:
+        y = coerce_year(c.get("year","") or "")
+        if not is_plausible_year(y): continue
+        by_src[c.get("source","other").lower()].append(y)
 
-    # Pages match
-    ex_pages = normalize_text(ex.get("pages", ""))
-    cand_pages = normalize_text(cand.get("pages", ""))
-    if ex_pages and cand_pages and ex_pages == cand_pages:
-        matches += 1
-        matching_fields.append("pages")
+    # source priority
+    for src in ("crossref","openalex","semanticscholar","pubmed","arxiv"):
+        ys = by_src.get(src, [])
+        if ys:
+            # prefer the most common within that source
+            y = Counter(ys).most_common(1)[0][0]
+            return y, src
 
-    # DOI match
-    ex_doi = normalize_text(ex.get("doi", "")).lower().replace("doi:", "")
-    cand_doi = normalize_text(cand.get("doi", "")).lower().replace("doi:", "")
-    if ex_doi and cand_doi and ex_doi == cand_doi:
-        matches += 1
-        matching_fields.append("doi")
+    # modal across all
+    all_ys = [y for ys in by_src.values() for y in ys]
+    if all_ys:
+        y = Counter(all_ys).most_common(1)[0][0]
+        return y, "consensus"
 
-    return matches, matching_fields
+    return "", ""
+
+def _consensus_record(ex: dict, candidates: List[Dict]) -> Tuple[Dict, List[str], Dict[str,str]]:
+    if not candidates: return {}, [], {}
+    clusters = _cluster_by_title(candidates)
+
+    def cl_score(cl: List[Dict]) -> float:
+        doi = _has_any_doi_agreement(cl)
+        if doi: return 100.0
+        return sum(_w(c.get("source")) for c in cl)
+
+    clusters.sort(key=cl_score, reverse=True)
+    top = clusters[0]
+
+    best: Dict = {"source":"consensus"}
+    provenance: Dict[str, str] = {}
+
+    # DOI
+    doi_agree = _has_any_doi_agreement(top)
+    if doi_agree:
+        best["doi"] = doi_agree; provenance["doi"] = "doi-agreement"
+    else:
+        v, _, src = _vote_field(top, "doi")
+        best["doi"] = v; provenance["doi"] = src or ""
+
+    # Title
+    v, _, src = _vote_field(top, "title")
+    best["title"] = v; provenance["title"] = src or ""
+
+    # Authors
+    a, _, src = _vote_authors(top)
+    best["authors"] = a; provenance["authors"] = src or ""
+
+    # Year (stronger tie-break)
+    y, ysrc = _best_year(top)
+    best["year"] = y; provenance["year"] = ysrc or provenance.get("doi","") or ""
+
+    # Rest
+    for k in ("journal_name","journal_abbrev","conference_name","volume","issue","pages","month","publisher","location","edition","isbn","url"):
+        v, _, src = _vote_field(top, k)
+        best[k] = v; provenance[k] = src or ""
+
+    # Matching fields (vs extracted)
+    matching_fields: List[str] = []
+    for k in ("title","authors","year","journal_name","volume","issue","pages","doi"):
+        exv = ex.get(k); bev = best.get(k)
+        if k == "authors":
+            exn = [_norm_author(a) for a in authors_to_list(exv or []) if _norm_author(a)]
+            ben = [_norm_author(a) for a in authors_to_list(bev or []) if _norm_author(a)]
+            if exn and ben and exn == ben: matching_fields.append(k)
+        elif k == "title":
+            if exv and bev and _title_sim(exv, bev) >= 0.82: matching_fields.append(k)
+        else:
+            if normalize_text(str(exv or "")) == normalize_text(str(bev or "")):
+                matching_fields.append(k)
+
+    return best, matching_fields, provenance
 
 def select_best(state: PipelineState) -> PipelineState:
     ex = state["extracted"]
-    candidates = state.get("candidates", [])
-    if not candidates:
+    cands = state.get("candidates", [])
+    if not cands:
         state["best"] = {}
         state["matching_fields"] = []
+        state["provenance"] = {}
         return state
 
-    best = None
-    best_score = -1
-    best_matches = 0
-    best_matching_fields = []
+    consensus, matching_fields, prov = _consensus_record(ex, cands)
 
-    for cand in candidates:
-        # Calculate current score using existing scoring function
-        score = score_candidate(ex, cand)
-        # Count matching fields
-        matches, matching_fields = count_matching_fields(ex, cand)
+    if not consensus.get("title") and cands:
+        best = max(cands, key=lambda c: score_candidate(ex, c))
+        if is_trustworthy_match(ex, best):
+            consensus2, matching_fields2, prov2 = _consensus_record(ex, [best])
+            # prefer single-candidate consensus only if it improves
+            consensus = consensus if consensus.get("year") or consensus.get("doi") else consensus2
+            matching_fields = matching_fields or matching_fields2
+            prov = prov or prov2
 
-        # Prioritize candidates with matching title or journal and correct authors
-        if (matches > best_matches or 
-            (matches == best_matches and score > best_score) or
-            ("authors" in matching_fields and matches >= best_matches)):
-            best = cand
-            best_score = score
-            best_matches = matches
-            best_matching_fields = matching_fields
-
-    # Require at least 3 matching fields, including title or journal, and trustworthy candidate
-    required_fields = {"title", "journal_name"}
-    if best and best_matches >= 3 and any(f in best_matching_fields for f in required_fields) and is_trustworthy_match(ex, best):
-        state["best"] = best
-        state["matching_fields"] = best_matching_fields
-    else:
-        state["best"] = {}
-        state["matching_fields"] = []
-
+    state["best"] = consensus or {}
+    state["matching_fields"] = matching_fields or []
+    state["provenance"] = prov or {}
     return state

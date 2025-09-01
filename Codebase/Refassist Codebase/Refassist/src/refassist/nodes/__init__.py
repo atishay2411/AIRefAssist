@@ -14,9 +14,11 @@ from .cleanup import cleanup
 from .routing import should_exit, route_after_verify
 from .validate_reference import validate_input_reference
 from .verify_journal_abbrev import verify_journal_abbrev
+from .llm_format import llm_format  # NEW
 
 __all__ = [
     "init_runtime","detect_type","parse_extract","multisource_lookup","select_best",
     "verify_agents","apply_corrections","llm_correct","enrich_from_best",
-    "format_reference","build_exports","build_report","cleanup","should_exit","route_after_verify","validate_input_reference", "verify_journal_abbrev",
+    "format_reference","build_exports","build_report","cleanup","should_exit","route_after_verify",
+    "validate_input_reference","verify_journal_abbrev","llm_format",
 ]
