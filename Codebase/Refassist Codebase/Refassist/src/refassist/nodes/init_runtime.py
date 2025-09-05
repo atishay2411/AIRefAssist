@@ -9,7 +9,10 @@ except Exception:
     httpx = None
 
 from ..state import PipelineState
-from ..tools.sources import CrossrefClient, OpenAlexClient, SemanticScholarClient, PubMedClient, ArxivClient
+from ..tools.sources import (
+    CrossrefClient, OpenAlexClient, SemanticScholarClient, PubMedClient, ArxivClient,
+    IEEEXploreClient,  # NEW
+)
 
 # ------------------------------
 # Shared resources (singleton-ish)
@@ -43,7 +46,9 @@ async def init_runtime(state: PipelineState) -> PipelineState:
     http, cache, limiter = _get_shared_resources(cfg)
 
     sources = [
-        CrossrefClient(cfg, client=http, limiter=limiter, cache=cache),
+        # Order matters: earlier sources have higher authority weight in consensus
+        CrossrefClient(cfg, client=http, limiter=limiter, cache=cache),          # DOI registry (authoritative)
+        IEEEXploreClient(cfg, client=http, limiter=limiter, cache=cache),        # NEW: IEEE venue authority
         OpenAlexClient(cfg, client=http, limiter=limiter, cache=cache),
         SemanticScholarClient(cfg, client=http, limiter=limiter, cache=cache),
         PubMedClient(cfg, client=http, limiter=limiter, cache=cache),

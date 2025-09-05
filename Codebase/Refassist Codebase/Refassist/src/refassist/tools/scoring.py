@@ -1,6 +1,13 @@
 from typing import Any, Dict, List
 from .utils import normalize_text, token_similarity, authors_to_list
 
+# NEW: venues we consider highly authoritative (when present)
+_TRUSTED_SOURCES = {"crossref", "ieeexplore", "openalex"}
+
+def _venue_similarity(a: str, b: str) -> float:
+    if not a or not b: return 0.0
+    return token_similarity(a, b)
+
 def score_candidate(extracted: Dict[str, Any], cand: Dict[str, Any]) -> float:
     score = 0.0
 
@@ -19,7 +26,7 @@ def score_candidate(extracted: Dict[str, Any], cand: Dict[str, Any]) -> float:
         inter = len(set(ex_auth) & set(ca_auth))
         score += 0.25 * (inter / max(1, len(set(ex_auth) | set(ca_auth))))
     else:
-        score -= 0.05  # slight penalty if we can’t check overlap
+        score -= 0.05
 
     ey = str(extracted.get("year") or "").strip()
     cy = str(cand.get("year") or "").strip()
@@ -35,24 +42,37 @@ def score_candidate(extracted: Dict[str, Any], cand: Dict[str, Any]) -> float:
             except Exception:
                 score -= 0.02
 
-    src_weight = {"crossref": 0.12, "openalex": 0.08, "semanticscholar": 0.06, "pubmed": 0.05, "arxiv": 0.03}
+    # NEW: venue similarity bonus (kept small but helps tie-break)
+    ex_venue = (normalize_text(extracted.get("journal_name") or extracted.get("conference_name") or ""))
+    ca_venue = (normalize_text(cand.get("journal_name") or cand.get("conference_name") or ""))
+    if ex_venue and ca_venue:
+        score += 0.08 * _venue_similarity(ex_venue, ca_venue)
+
+    # Source weights (IEEE Xplore highest among sources we query)
+    src_weight = {"ieeexplore": 0.16, "crossref": 0.12, "openalex": 0.08, "semanticscholar": 0.06, "pubmed": 0.05, "arxiv": 0.03}
     score += src_weight.get(cand.get("source",""), 0.0)
     return score
 
 def is_trustworthy_match(ex, cand) -> bool:
     """
-    Strong guard:
-      - DOI match => trust.
-      - Else require very high title similarity (>= 0.90)
-        AND (author overlap OR |year_gap| <= 2).
+    Strict guard:
+      - DOI exact match => trust.
+      - Else require very high title similarity (>= 0.93)
+        AND (author overlap OR |year_gap| <= 1)
+        AND (if both venues present) venue similarity >= 0.80.
+      - Only trust if candidate source is in TRUSTED_SOURCES.
     """
+    src = (cand.get("source") or "").lower()
+    if src not in _TRUSTED_SOURCES:
+        return False
+
     ex_doi = normalize_text(ex.get("doi")).lower().replace("doi:","")
     ca_doi = normalize_text(cand.get("doi")).lower().replace("doi:","")
     if ex_doi and ca_doi and ex_doi == ca_doi:
         return True
 
     t_sim = token_similarity(ex.get("title",""), cand.get("title",""))
-    if t_sim < 0.90:
+    if t_sim < 0.93:
         return False
 
     ex_last = {a.split()[-1].lower() for a in authors_to_list(ex.get("authors")) if a.split()}
@@ -64,8 +84,14 @@ def is_trustworthy_match(ex, cand) -> bool:
     year_ok = False
     if ey.isdigit() and cy.isdigit():
         try:
-            year_ok = abs(int(ey) - int(cy)) <= 2
+            year_ok = abs(int(ey) - int(cy)) <= 1
         except Exception:
             year_ok = False
 
-    return author_ok or year_ok
+    venue_ok = True
+    ex_venue = normalize_text(ex.get("journal_name") or ex.get("conference_name") or "")
+    ca_venue = normalize_text(cand.get("journal_name") or cand.get("conference_name") or "")
+    if ex_venue and ca_venue:
+        venue_ok = _venue_similarity(ex_venue, ca_venue) >= 0.80
+
+    return (author_ok or year_ok) and venue_ok

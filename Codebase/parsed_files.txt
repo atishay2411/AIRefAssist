@@ -1,37 +1,3 @@
-logging.py:
-import os, json, logging
-
-LOG_LEVEL = os.getenv("IEEE_REF_LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format="%(message)s")
-logger = logging.getLogger("refassist")
-
-def jlog(**kw):
-    try:
-        print(json.dumps(kw, ensure_ascii=False))
-    except Exception:
-        print(str(kw))
-
-
-config.py:
-from dataclasses import dataclass
-import os
-
-@dataclass
-class PipelineConfig:
-    timeout_s: float = float(os.getenv("IEEE_REF_TIMEOUT", "12"))
-    concurrency: int = int(os.getenv("IEEE_REF_CONCURRENCY", "8"))
-    cache_ttl_s: int = int(os.getenv("IEEE_REF_CACHE_TTL", "3600"))
-    max_correction_rounds: int = int(os.getenv("IEEE_REF_MAX_CORR", "3"))
-    max_hops: int = int(os.getenv("IEEE_REF_MAX_HOPS", "12"))
-    stagnation_patience: int = int(os.getenv("IEEE_REF_STAGNATION", "2"))
-    llm_provider: str = os.getenv("IEEE_REF_LLM", "auto")
-    openai_model: str = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-    ollama_model: str = os.getenv("OLLAMA_MODEL", "llama3.2")
-    ollama_base: str = os.getenv("OLLAMA_BASE_URL", os.getenv("OLLAMA_HOST", "http://localhost:11434"))
-    agent_threads: int = int(os.getenv("IEEE_REF_AGENT_THREADS", "6"))
-    recursion_limit: int = int(os.getenv("IEEE_REF_RECURSION_LIMIT", "60"))
-
-
 __init__.py:
 """RefAssist — Agentic IEEE Reference Pipeline (LangGraph)"""
 
@@ -45,6 +11,14 @@ __all__ = ["build_graph", "run_one", "PipelineConfig"]
 # Load top-level .env
 load_dotenv()  
 
+
+
+__init__.py:
+from .mermaid import MERMAID_DAG, show_mermaid_inline, show_mermaid_kroki
+__all__ = ["MERMAID_DAG","show_mermaid_inline","show_mermaid_kroki"]
+
+
+type_reconcile.py:
 from typing import Dict, List, Optional
 from collections import Counter
 
@@ -61,20 +35,20 @@ TYPE_CANON = {
 }
 
 def reconcile_type(candidates: List[Dict[str, str]], llm_vote: Optional[str]) -> str:
-    votes = []
+    votes: List[str] = []
 
-    # LLM vote
     if llm_vote:
         votes.append(llm_vote.lower())
 
-    # Online sources
     for c in candidates or []:
         source = c.get("source")
         if source == "crossref":
-            t = c.get("cr_type", "")
-            if t: votes.append(TYPE_CANON.get(t, t))
+            t = (c.get("cr_type") or "").strip()
+            if t:
+                votes.append(TYPE_CANON.get(t, t))
         elif source == "openalex":
-            if c.get("oa_is_proceedings"): votes.append("conference paper")
+            if c.get("oa_is_proceedings"):
+                votes.append("conference paper")
         elif source == "semanticscholar":
             types = c.get("s2_types") or []
             if any("conference" in t for t in types): votes.append("conference paper")
@@ -83,7 +57,6 @@ def reconcile_type(candidates: List[Dict[str, str]], llm_vote: Optional[str]) ->
         elif source == "arxiv":
             votes.append("preprint")
 
-    # Pick the majority vote
     if votes:
         return Counter(votes).most_common(1)[0][0]
     return "other"
@@ -95,30 +68,72 @@ from .utils import normalize_text, token_similarity, authors_to_list
 
 def score_candidate(extracted: Dict[str, Any], cand: Dict[str, Any]) -> float:
     score = 0.0
+
     ex_doi = normalize_text(extracted.get("doi") or "").lower().replace("doi:","")
     ca_doi = normalize_text(cand.get("doi") or "").lower().replace("doi:","")
-    if ex_doi and ca_doi and ex_doi == ca_doi: score += 1.0
-    score += 0.6 * token_similarity(extracted.get("title") or "", cand.get("title") or "")
+    if ex_doi and ca_doi and ex_doi == ca_doi:
+        score += 1.0
+
+    # Titles carry most of the signal
+    t_sim = token_similarity(extracted.get("title") or "", cand.get("title") or "")
+    score += 0.9 * t_sim
+
     ex_auth = [a.split()[-1].lower() for a in authors_to_list(extracted.get("authors")) if a.split()]
     ca_auth = [a.split()[-1].lower() for a in authors_to_list(cand.get("authors")) if a.split()]
     if ex_auth and ca_auth:
         inter = len(set(ex_auth) & set(ca_auth))
-        score += 0.2 * (inter / max(1, len(set(ex_auth) | set(ca_auth))))
+        score += 0.25 * (inter / max(1, len(set(ex_auth) | set(ca_auth))))
+    else:
+        score -= 0.05  # slight penalty if we can’t check overlap
+
     ey = str(extracted.get("year") or "").strip()
     cy = str(cand.get("year") or "").strip()
-    if ey and cy and ey == cy: score += 0.1
+    if ey and cy:
+        if ey == cy:
+            score += 0.12
+        else:
+            try:
+                gap = abs(int(ey[:4]) - int(cy[:4]))
+                if gap == 1: score -= 0.03
+                elif gap == 2: score -= 0.06
+                elif gap >= 3: score -= 0.12
+            except Exception:
+                score -= 0.02
+
     src_weight = {"crossref": 0.12, "openalex": 0.08, "semanticscholar": 0.06, "pubmed": 0.05, "arxiv": 0.03}
     score += src_weight.get(cand.get("source",""), 0.0)
     return score
 
 def is_trustworthy_match(ex, cand) -> bool:
+    """
+    Strong guard:
+      - DOI match => trust.
+      - Else require very high title similarity (>= 0.90)
+        AND (author overlap OR |year_gap| <= 2).
+    """
     ex_doi = normalize_text(ex.get("doi")).lower().replace("doi:","")
     ca_doi = normalize_text(cand.get("doi")).lower().replace("doi:","")
-    if ex_doi and ca_doi and ex_doi == ca_doi: return True
+    if ex_doi and ca_doi and ex_doi == ca_doi:
+        return True
+
     t_sim = token_similarity(ex.get("title",""), cand.get("title",""))
+    if t_sim < 0.90:
+        return False
+
     ex_last = {a.split()[-1].lower() for a in authors_to_list(ex.get("authors")) if a.split()}
     ca_last = {a.split()[-1].lower() for a in authors_to_list(cand.get("authors")) if a.split()}
-    return (t_sim >= 0.8) and bool(ex_last & ca_last)
+    author_ok = bool(ex_last and ca_last and (ex_last & ca_last))
+
+    ey = normalize_text(ex.get("year") or "")[:4]
+    cy = normalize_text(cand.get("year") or "")[:4]
+    year_ok = False
+    if ey.isdigit() and cy.isdigit():
+        try:
+            year_ok = abs(int(ey) - int(cy)) <= 2
+        except Exception:
+            year_ok = False
+
+    return author_ok or year_ok
 
 
 __init__.py:
@@ -135,7 +150,7 @@ from datetime import datetime
 
 DEFAULT_UA = "ieee-ref-agent/1.0 (mailto:you@example.com)"
 SUFFIXES = {"jr", "jr.", "sr", "sr.", "ii", "iii", "iv", "v"}
-MONTHS_NAME = {"1":"Jan","2":"Feb","3":"Mar","4":"Apr","5":"May","6":"Jun","7":"Jul","8":"Aug","9":"Sep","10":"Oct","11":"Nov","12":"Dec"}
+MONTHS_NAME = {"1":"Jan","2":"Feb","3":"Mar","4":"Apr","4":"Apr","5":"May","6":"Jun","7":"Jul","8":"Aug","9":"Sep","10":"Oct","11":"Nov","12":"Dec"}
 
 try:
     from rapidfuzz import fuzz
@@ -203,6 +218,7 @@ def authors_to_list(a: Any) -> List[str]:
     parts = re.split(r",\s*|\s+&\s+| and ", str(a))
     return [normalize_text(p) for p in parts if normalize_text(p)]
 
+
 def _initials(given: str) -> List[str]:
     parts = re.split(r"\s+", given.strip()); out=[]
     for p in parts:
@@ -232,11 +248,25 @@ def format_author_ieee(name: str) -> str:
     return f"{init} {last}".strip()
 
 def format_authors_ieee_list(auths: List[str]) -> str:
+    """
+    IEEE reference-list rule:
+      - If there are 1–6 authors: list them all, using 'and' before the last.
+      - If there are >=7 authors: list ONLY the first author followed by '*et al.*'
+        (et al. is italicized in many IEEE guides).
+    Sources: IEEE Reference Guide; Purdue OWL IEEE. 
+    """
     items = [format_author_ieee(a) for a in auths if a]
-    if not items: return ""
-    if len(items) <= 6:
-        return ", ".join(items[:-1]) + (", and " if len(items) > 1 else "") + items[-1] if len(items) > 1 else items[0]
-    return ", ".join(items[:6]) + ", et al."
+    n = len(items)
+    if n == 0:
+        return ""
+    if n >= 7:
+        # First author + italicized et al.
+        return f"{items[0]} *et al.*"
+    if n == 1:
+        return items[0]
+    # 2–6 authors: comma-separated with ', and' before last
+    return ", ".join(items[:-1]) + ", and " + items[-1]
+
 
 def heuristic_abbrev(fullname: str) -> str:
     return ""
@@ -250,9 +280,25 @@ def format_doi_link(doi: str) -> str:
     return f"https://doi.org/{d}" if d else ""
 
 def normalize_pages(p: str) -> Tuple[str, bool]:
+    """
+    Normalize 'pages' and flag e-locations.
+
+    Returns (normalized_pages, is_elocation):
+
+    - Convert en/em dashes to '-'.
+    - If it contains a numeric range like '5338-5346' => (same, False).
+    - If it’s a single numeric page '5338'        => ('5338', False).
+    - If it’s alphanumeric (e.g., 'e1234', 'A12') => (same, True).
+    - Otherwise                                    => (as-is, False).
+    """
     p = normalize_text(p).replace("—","-").replace("–","-")
-    if not p: return "", False
-    if ("-" not in p) and re.fullmatch(r"[A-Za-z]?\d+[A-Za-z]?", p):
+    if not p:
+        return "", False
+    if "-" in p:
+        return p, False
+    if re.fullmatch(r"\d+", p):
+        return p, False
+    if re.fullmatch(r"[A-Za-z]\d+[A-Za-z]?", p) or re.search(r"[A-Za-z]", p):
         return p, True
     return p, False
 
@@ -292,11 +338,13 @@ def coerce_year(y: Any) -> str:
     return m.group(1)
 
 
+
+
 http.py:
 import asyncio
 from typing import Any, Dict, Optional
 from cachetools import TTLCache
-from ..tools.utils import DEFAULT_UA
+from .utils import DEFAULT_UA  # fixed import
 try:
     import httpx
 except Exception:
@@ -907,8 +955,6 @@ async def verify_journal_abbrev(state: PipelineState) -> PipelineState:
     return state
 
 
-build_report.py:
-
 import os
 from docx import Document
 from docx.shared import Pt
@@ -1085,8 +1131,24 @@ apply_corrections.py:
 from typing import Any, Dict, List, Tuple
 from ..state import PipelineState
 from ..tools.utils import normalize_text, authors_to_list, normalize_month_field, fingerprint_state
+import re
 
 _ALWAYS_REWRITE = {"title","authors","year","month","doi"}  # critical truth fields
+
+def _is_single_numeric_page(s: str) -> bool:
+    s = normalize_text(s)
+    return bool(s) and ("-" not in s) and bool(re.fullmatch(r"\d+", s))
+
+def _extract_first_number(s: str) -> str:
+    m = re.search(r"\d+", normalize_text(s))
+    return m.group(0) if m else ""
+
+def _is_range_with_two_numbers(s: str) -> bool:
+    s = normalize_text(s).replace("—","-").replace("–","-")
+    if "-" not in s:
+        return False
+    nums = re.findall(r"\d+", s)
+    return len(nums) >= 2
 
 def apply_corrections(state: PipelineState) -> PipelineState:
     ex = dict(state["extracted"])
@@ -1107,14 +1169,28 @@ def apply_corrections(state: PipelineState) -> PipelineState:
     # Apply consensus-best (force for core truth fields)
     for k in fields:
         bv = best.get(k)
-        if not bv: continue
+        if not bv: 
+            continue
         if (k in _ALWAYS_REWRITE) or (k not in matching_fields):
             if normalize_text(ex.get(k, "")) != normalize_text(bv):
                 changes.append((k, ex.get(k), bv))
                 ex[k] = bv
-                # provenance for this correction
                 if prov.get(k):
                     audit[k] = prov.get(k)
+
+    # Special handling for 'pages': single -> full range if compatible
+    ex_pages = normalize_text(ex.get("pages", ""))
+    be_pages = normalize_text(best.get("pages", ""))
+
+    if ex_pages and be_pages:
+        if _is_single_numeric_page(ex_pages) and _is_range_with_two_numbers(be_pages):
+            ex_start = _extract_first_number(ex_pages)
+            be_first = _extract_first_number(be_pages)
+            if ex_start and be_first and ex_start == be_first:
+                if normalize_text(ex.get("pages","")) != be_pages:
+                    changes.append(("pages", ex.get("pages"), be_pages))
+                    ex["pages"] = be_pages
+                    audit.setdefault("pages", prov.get("pages","consensus"))
 
     # Suggestions on top
     for k, v in suggestions.items():
@@ -1122,7 +1198,6 @@ def apply_corrections(state: PipelineState) -> PipelineState:
             if normalize_text(ex.get(k, "")) != normalize_text(v):
                 changes.append((k, ex.get(k), v))
                 ex[k] = v
-                # suggestions are from verify_agents / LLM; mark provenance if not already set
                 audit.setdefault(k, "verify/llm")
 
     # Normalize
@@ -1159,13 +1234,35 @@ def apply_corrections(state: PipelineState) -> PipelineState:
 
 enrich_from_best.py:
 from ..state import PipelineState
-from ..tools.utils import normalize_month_field
+from ..tools.utils import normalize_month_field, normalize_text
+import re
+
+def _is_single_numeric_page(s: str) -> bool:
+    s = normalize_text(s)
+    return bool(s) and ("-" not in s) and bool(re.fullmatch(r"\d+", s))
+
+def _is_two_number_range(s: str) -> bool:
+    s = normalize_text(s).replace("—","-").replace("–","-")
+    nums = re.findall(r"\d+", s)
+    return ("-" in s) and (len(nums) >= 2)
+
+def _first_num(s: str) -> str:
+    m = re.search(r"\d+", normalize_text(s))
+    return m.group(0) if m else ""
 
 def enrich_from_best(state: PipelineState) -> PipelineState:
     ex = dict(state["extracted"]); be = state.get("best") or {}
     for k in ("journal_abbrev","journal_name","volume","issue","pages","year","month","doi","conference_name","publisher","location","edition","isbn","url","title","authors"):
         if not ex.get(k) and be.get(k):
             ex[k] = be.get(k)
+
+    # Upgrade single start page to full range if best has it and starts the same
+    if ex.get("pages") and be.get("pages"):
+        exp, bep = normalize_text(ex["pages"]), normalize_text(be["pages"])
+        if _is_single_numeric_page(exp) and _is_two_number_range(bep):
+            if _first_num(exp) and _first_num(exp) == _first_num(bep):
+                ex["pages"] = bep
+
     if ex.get("month"):
         ex["month"] = normalize_month_field(ex["month"])
     state["extracted"] = ex
@@ -1409,11 +1506,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from ..config import PipelineConfig
 from ..state import PipelineState
 from ..tools.utils import (
-    heuristic_abbrev, token_similarity, authors_to_list, normalize_text, normalize_month_field, fingerprint_state
+    heuristic_abbrev, token_similarity, authors_to_list, normalize_text,
+    normalize_month_field, fingerprint_state, is_plausible_year
 )
 
 def normalize_author_name(author: str) -> str:
-    """Normalize author name for comparison."""
     parts = author.strip().split()
     if not parts:
         return ""
@@ -1432,21 +1529,27 @@ def agent_journal(extracted, best):
     ex_ab = normalize_text(extracted.get("journal_abbrev", ""))
     be_j = normalize_text(best.get("journal_name", ""))
     be_ab = normalize_text(best.get("journal_abbrev", ""))
-    sim_full = token_similarity(ex_j, be_j) if ex_j and be_j else 0.0
-    sim_ab = token_similarity(ex_ab, be_ab) if ex_ab and be_ab else 0.0
-    ok = (sim_full >= 0.8) or (sim_ab >= 0.8) or (bool(ex_j) and not be_j)
     corr = {}
-    if be_j and be_j != ex_j: corr["journal_name"] = be_j
-    if (be_ab and be_ab != ex_ab) or (not ex_ab and (be_ab or be_j)):
+    ok = False
+
+    if be_j or be_ab:
+        sim_full = token_similarity(ex_j, be_j) if ex_j and be_j else 0.0
+        sim_ab = token_similarity(ex_ab, be_ab) if ex_ab and be_ab else 0.0
+        ok = (sim_full >= 0.90) or (sim_ab >= 0.90)
+        if be_j and be_j != ex_j: corr["journal_name"] = be_j
         chosen = _prefer_abbrev(be_ab, heuristic_abbrev(be_j or ex_j))
-        corr["journal_abbrev"] = chosen
+        if (be_ab and be_ab != ex_ab) or (not ex_ab and chosen):
+            corr["journal_abbrev"] = chosen
+    else:
+        ok = False
+
     return {"ok": ok, "correction": corr or None}
 
 def agent_authors(extracted, best):
     ex = authors_to_list(extracted.get("authors", []))
     be = authors_to_list(best.get("authors", []))
     if not be:
-        return {"ok": bool(ex), "correction": None}
+        return {"ok": False, "correction": None}
 
     def norm_list(L):
         return [normalize_author_name(a) for a in L if normalize_author_name(a)]
@@ -1455,11 +1558,9 @@ def agent_authors(extracted, best):
     if not exn or not ben:
         return {"ok": False, "correction": {"authors": be} if be else None}
 
-    # exact list equality after normalization (ordered)
     if exn == ben:
         return {"ok": True, "correction": None}
 
-    # allow minor order differences: if sets equal and length equal, still suggest canonical be
     if len(exn) == len(ben) and set(exn) == set(ben):
         return {"ok": True, "correction": {"authors": be}}
 
@@ -1470,32 +1571,43 @@ def agent_title(extracted, best):
     be_t = normalize_text(best.get("title", ""))
     if be_t:
         sim = token_similarity(ex_t, be_t)
-        if sim >= 0.82:
-            return {"ok": True}
-        return {"ok": False, "correction": {"title": be_t}}
-    return {"ok": bool(ex_t)}
+        return {"ok": sim >= 0.90, "correction": None if sim >= 0.90 else {"title": be_t}}
+    return {"ok": False, "correction": None}
 
 def agent_year_month(extracted, best):
-    ex_y = str(extracted.get("year", ""))
+    ex_y = str(extracted.get("year", "")).strip()
     ex_m = normalize_month_field(extracted.get("month", ""))
-    be_y = str(best.get("year", ""))
+    be_y = str(best.get("year", "")).strip()
     be_m = normalize_month_field(best.get("month", ""))
-    ok = True
+
+    ok = False
     corr = {}
-    if be_y and be_y != ex_y: corr["year"] = be_y; ok = False
-    if be_m and be_m != ex_m: corr["month"] = be_m; ok = False
+
+    if be_y or be_m:
+        if be_y and be_y != ex_y: corr["year"] = be_y
+        if be_m and be_m != ex_m: corr["month"] = be_m
+        ok = not bool(corr)
+    else:
+        ok = is_plausible_year(ex_y) and bool(ex_y)
+
     return {"ok": ok, "correction": corr or None}
 
 def agent_vipd(extracted, best):
     ex_v, ex_i, ex_p, ex_d = [normalize_text(extracted.get(k, "")) for k in ("volume", "issue", "pages", "doi")]
     be_v, be_i, be_p, be_d = [normalize_text(best.get(k, "")) for k in ("volume", "issue", "pages", "doi")]
-    ok = True
     corr = {}
-    if be_v and be_v != ex_v: corr["volume"] = be_v; ok = False
-    if be_i and be_i != ex_i: corr["issue"] = be_i; ok = False
-    if be_p and be_p != ex_p: corr["pages"] = be_p; ok = False
-    if be_d and be_d.lower().replace("doi:", "") != ex_d.lower().replace("doi:", ""):
-        corr["doi"] = be_d; ok = False
+    ok = False
+
+    if be_v or be_i or be_p or be_d:
+        if be_v and be_v != ex_v: corr["volume"] = be_v
+        if be_i and be_i != ex_i: corr["issue"] = be_i
+        if be_p and be_p != ex_p: corr["pages"] = be_p
+        if be_d and be_d.lower().replace("doi:", "") != ex_d.lower().replace("doi:", ""):
+            corr["doi"] = be_d
+        ok = not bool(corr)
+    else:
+        ok = False
+
     return {"ok": ok, "correction": corr or None}
 
 def agent_presence(extracted, best):
@@ -1572,33 +1684,42 @@ IEEE_HINT = (
     "Do NOT invent or modify facts. If a field is missing, omit it. "
     "Output must be a single formatted reference line (no JSON, no commentary). "
     "Use italics with *asterisks* around container titles if present. "
-    "In IEEE reference format, the abbreviation et al. is used in the reference list when a source has three or more authors, listing only the first author's name (in the format Initial(s). Surname) followed by *et al.* in italics. For sources with one or two authors, all names are listed in full, and et al. is not used. This rule ensures concise and consistent citation formatting across various source types, such as journal articles, books, and conference papers."
-    "Follow IEEE patterns for each type:\n"
-    "- journal article: Authors, \"Title,\" *Journal*, vol. X, no. Y, pp. A–B or Art. no. N, Mon YYYY, https://doi.org/DOI.\n"
-    "- conference paper: Authors, \"Title,\" in *Conference Name*, Location, pp. A–B, Mon YYYY, https://doi.org/DOI.\n"
-    "- book: Authors, *Title*, Edition ed., Location: Publisher, YYYY, ISBN if provided, DOI/URL if provided.\n"
-    "- book chapter: Authors, \"Title,\" in *Book Title*, pp. A–B, Publisher, Mon YYYY, DOI/URL.\n"
-    "- preprint: Authors, \"Title,\" preprint (arXiv if indicated), Mon YYYY, DOI/URL.\n"
-    "Ensure authors are in IEEE initials style if already provided that way; otherwise use as given. "
-    "Never change the year, DOI, title, or authors — use them exactly as provided."
+    "Authors rule (IEEE reference list): list all authors if there are up to six. "
+    "If there are seven or more authors, list only the first author followed by *et al.* "
+    "Always include full page ranges if available (e.g., pp. 5338–5346); if only one page is present, use 'p. N'. "
+    "Do NOT guess missing pages."
 )
 
 def _is_reasonable(ref: str) -> bool:
     if not ref or len(ref) < 20:
         return False
-    # must contain at least a title quote or an italic block for containers, or a DOI/http
-    if ("\"" in ref) or ("*") in ref or ("doi.org/" in ref) or ("http" in ref):
-        return True
-    return False
+    return ("\"" in ref) or ("*") in ref or ("doi.org/" in ref) or ("http" in ref)
 
 def _safe_line(s: str) -> str:
     s = s.strip()
-    # collapse whitespace
     s = re.sub(r"\s+", " ", s)
-    # ensure trailing period
     if s and not s.endswith("."):
         s += "."
     return s
+
+def _normalize_pages_field(pages: str) -> str:
+    pages = (pages or "").strip()
+    if not pages:
+        return ""
+    nums = re.findall(r"\d+", pages)
+    if len(nums) == 2:
+        return f"{nums[0]}–{nums[1]}"
+    if len(nums) == 1:
+        return nums[0]
+    return pages
+
+def _post_sanitize(s: str) -> str:
+    s = re.sub(r"\s+,", ",", s)
+    s = re.sub(r"\s+\.", ".", s)
+    s = re.sub(r"\bpp\.\s*(?=[,\.](?:\s|$))", "", s)
+    s = re.sub(r"\bpp\.\s*(\d+)[\s,]+(\d+)", r"pp. \1–\2", s)
+    s = re.sub(r"\s+", " ", s)
+    return s.strip()
 
 async def llm_format(state: PipelineState) -> PipelineState:
     llm = state.get("_llm")
@@ -1608,12 +1729,13 @@ async def llm_format(state: PipelineState) -> PipelineState:
     if not llm:
         return state
 
-    # Build a locked, authoritative view for the LLM to format from.
-    # We DO NOT let the LLM change these values — it only formats.
+    if "pages" in ex and ex["pages"]:
+        ex["pages"] = _normalize_pages_field(str(ex["pages"]))
+
     payload_lines = [f"type: {rtype}"]
     for k in (
-        "title","authors","journal_name","journal_abbrev","conference_name","volume","issue",
-        "pages","year","month","doi","publisher","location","edition","isbn","url"
+        "title","authors","journal_name","journal_abbrev","conference_name",
+        "volume","issue","pages","year","month","doi","publisher","location","edition","isbn","url"
     ):
         v = ex.get(k)
         if v is None or v == "":
@@ -1624,7 +1746,6 @@ async def llm_format(state: PipelineState) -> PipelineState:
             payload_lines.append(f"{k}: {v}")
 
     user_payload = "\n".join(payload_lines)
-
     prompt = (
         f"{IEEE_HINT}\n\n"
         f"Fields to use (authoritative; do not change values):\n{user_payload}\n\n"
@@ -1633,14 +1754,15 @@ async def llm_format(state: PipelineState) -> PipelineState:
 
     out_text = (await llm.text(prompt)).strip() if hasattr(llm, "text") else ""
     if _is_reasonable(out_text):
-        state["formatted"] = _safe_line(out_text)
-    # If the LLM output is not reasonable, leave 'formatted' unset to trigger fallback.
+        cleaned = _post_sanitize(_safe_line(out_text))
+        state["formatted"] = _safe_line(cleaned)
     return state
 
 
 select_best.py:
 from collections import Counter, defaultdict
 from typing import Dict, List, Tuple, Optional
+import re
 from ..state import PipelineState
 from ..tools.scoring import score_candidate, is_trustworthy_match
 from ..tools.utils import normalize_text, token_similarity, authors_to_list, is_plausible_year, coerce_year
@@ -1658,7 +1780,8 @@ def _title_sim(a: str, b: str) -> float:
 
 def _cluster_by_title(cands: List[Dict]) -> List[List[Dict]]:
     clusters: List[List[Dict]] = []
-    THRESH = 0.82
+    # tighter to avoid merging similar papers
+    THRESH = 0.90
     for c in cands:
         placed = False
         for cl in clusters:
@@ -1671,6 +1794,20 @@ def _cluster_by_title(cands: List[Dict]) -> List[List[Dict]]:
 def _w(src: str) -> float:
     return {"crossref":1.0,"openalex":0.8,"semanticscholar":0.6,"pubmed":0.55,"arxiv":0.4}.get((src or "").lower(), 0.2)
 
+def _pages_richness(s: str) -> int:
+    """
+    0 = empty/none; 1 = single numeric (e.g., '5338'); 2 = numeric range (e.g., '5338-5346')
+    """
+    if not s:
+        return 0
+    s2 = normalize_text(s).replace("—","-").replace("–","-")
+    nums = re.findall(r"\d+", s2)
+    if "-" in s2 and len(nums) >= 2:
+        return 2
+    if len(nums) == 1:
+        return 1
+    return 0
+
 def _vote_field(cl: List[Dict], key: str) -> Tuple[str, float, Optional[str]]:
     bucket: Dict[str, float] = defaultdict(float)
     source_for: Dict[str, str] = {}
@@ -1679,10 +1816,21 @@ def _vote_field(cl: List[Dict], key: str) -> Tuple[str, float, Optional[str]]:
         if not v: continue
         w = _w(c.get("source"))
         bucket[v] += w
-        # keep first strongest source label for audit
         if v not in source_for or w > _w(source_for.get(v,"")):
             source_for[v] = c.get("source")
     if not bucket: return "", 0.0, None
+
+    # Prefer richer pages value when voting for 'pages'
+    if key == "pages":
+        best_val, best_w = None, -1.0
+        best_rich, best_len = -1, -1
+        for v, w in bucket.items():
+            rich = _pages_richness(v)
+            if (w > best_w) or (w == best_w and rich > best_rich) or (w == best_w and rich == best_rich and len(v) > best_len):
+                best_val, best_w = v, w
+                best_rich, best_len = rich, len(v)
+        return best_val or "", best_w, source_for.get(best_val or "")
+    # default path
     best_val, best_w = max(bucket.items(), key=lambda kv: kv[1])
     return best_val, best_w, source_for.get(best_val)
 
@@ -1714,35 +1862,20 @@ def _has_any_doi_agreement(cluster: List[Dict]) -> str:
     return ""
 
 def _best_year(cl: List[Dict]) -> Tuple[str, str]:
-    """
-    Choose year with strong tie-break:
-    1) Crossref year if plausible (from any of issued/published-* we normalized into 'year')
-    2) OpenAlex
-    3) SemanticScholar
-    4) PubMed
-    Otherwise modal plausible year.
-    Returns (year, provenance_source)
-    """
     by_src: Dict[str, List[str]] = defaultdict(list)
     for c in cl:
         y = coerce_year(c.get("year","") or "")
         if not is_plausible_year(y): continue
         by_src[c.get("source","other").lower()].append(y)
-
-    # source priority
     for src in ("crossref","openalex","semanticscholar","pubmed","arxiv"):
         ys = by_src.get(src, [])
         if ys:
-            # prefer the most common within that source
             y = Counter(ys).most_common(1)[0][0]
             return y, src
-
-    # modal across all
     all_ys = [y for ys in by_src.values() for y in ys]
     if all_ys:
         y = Counter(all_ys).most_common(1)[0][0]
         return y, "consensus"
-
     return "", ""
 
 def _consensus_record(ex: dict, candidates: List[Dict]) -> Tuple[Dict, List[str], Dict[str,str]]:
@@ -1760,7 +1893,6 @@ def _consensus_record(ex: dict, candidates: List[Dict]) -> Tuple[Dict, List[str]
     best: Dict = {"source":"consensus"}
     provenance: Dict[str, str] = {}
 
-    # DOI
     doi_agree = _has_any_doi_agreement(top)
     if doi_agree:
         best["doi"] = doi_agree; provenance["doi"] = "doi-agreement"
@@ -1768,24 +1900,41 @@ def _consensus_record(ex: dict, candidates: List[Dict]) -> Tuple[Dict, List[str]
         v, _, src = _vote_field(top, "doi")
         best["doi"] = v; provenance["doi"] = src or ""
 
-    # Title
     v, _, src = _vote_field(top, "title")
     best["title"] = v; provenance["title"] = src or ""
 
-    # Authors
     a, _, src = _vote_authors(top)
     best["authors"] = a; provenance["authors"] = src or ""
 
-    # Year (stronger tie-break)
     y, ysrc = _best_year(top)
     best["year"] = y; provenance["year"] = ysrc or provenance.get("doi","") or ""
 
-    # Rest
     for k in ("journal_name","journal_abbrev","conference_name","volume","issue","pages","month","publisher","location","edition","isbn","url"):
         v, _, src = _vote_field(top, k)
         best[k] = v; provenance[k] = src or ""
 
-    # Matching fields (vs extracted)
+    # prefer richer page ranges if the top cluster has one starting at the same first page
+    top_pages = best.get("pages", "")
+    if _pages_richness(top_pages) == 1:
+        start = re.search(r"\d+", top_pages)
+        start = start.group(0) if start else ""
+        if start:
+            richest = top_pages
+            richest_src = provenance.get("pages", "")
+            richest_rank = 1
+            for c in top:
+                candp = normalize_text(c.get("pages",""))
+                if _pages_richness(candp) == 2:
+                    nums = re.findall(r"\d+", candp)
+                    if nums and nums[0] == start:
+                        if 2 > richest_rank or (2 == richest_rank and len(candp) > len(richest)):
+                            richest = candp
+                            richest_src = c.get("source", richest_src)
+                            richest_rank = 2
+            if richest_rank == 2 and richest != top_pages:
+                best["pages"] = richest
+                provenance["pages"] = richest_src or provenance.get("pages","")
+
     matching_fields: List[str] = []
     for k in ("title","authors","year","journal_name","volume","issue","pages","doi"):
         exv = ex.get(k); bev = best.get(k)
@@ -1794,7 +1943,7 @@ def _consensus_record(ex: dict, candidates: List[Dict]) -> Tuple[Dict, List[str]
             ben = [_norm_author(a) for a in authors_to_list(bev or []) if _norm_author(a)]
             if exn and ben and exn == ben: matching_fields.append(k)
         elif k == "title":
-            if exv and bev and _title_sim(exv, bev) >= 0.82: matching_fields.append(k)
+            if exv and bev and _title_sim(exv, bev) >= 0.90: matching_fields.append(k)
         else:
             if normalize_text(str(exv or "")) == normalize_text(str(bev or "")):
                 matching_fields.append(k)
@@ -1812,14 +1961,22 @@ def select_best(state: PipelineState) -> PipelineState:
 
     consensus, matching_fields, prov = _consensus_record(ex, cands)
 
-    if not consensus.get("title") and cands:
-        best = max(cands, key=lambda c: score_candidate(ex, c))
-        if is_trustworthy_match(ex, best):
-            consensus2, matching_fields2, prov2 = _consensus_record(ex, [best])
-            # prefer single-candidate consensus only if it improves
-            consensus = consensus if consensus.get("year") or consensus.get("doi") else consensus2
+    # If consensus is weak/untrusted, try best-scored or best-title but require trust
+    def _title_sim_to_ex(c): return _title_sim(ex.get("title",""), c.get("title",""))
+    if not consensus.get("title") or not is_trustworthy_match(ex, consensus):
+        best_scored = max(cands, key=lambda c: score_candidate(ex, c))
+        if is_trustworthy_match(ex, best_scored):
+            consensus2, matching_fields2, prov2 = _consensus_record(ex, [best_scored])
+            consensus = consensus2 or consensus
             matching_fields = matching_fields or matching_fields2
             prov = prov or prov2
+        else:
+            best_by_title = max(cands, key=_title_sim_to_ex)
+            if _title_sim_to_ex(best_by_title) >= 0.93 and is_trustworthy_match(ex, best_by_title):
+                consensus2, matching_fields2, prov2 = _consensus_record(ex, [best_by_title])
+                consensus = consensus2 or consensus
+                matching_fields = matching_fields or matching_fields2
+                prov = prov or prov2
 
     state["best"] = consensus or {}
     state["matching_fields"] = matching_fields or []
@@ -2379,6 +2536,7 @@ __init__.py:
 from .adapter import LLMAdapter
 __all__ = ["LLMAdapter"]
 
+__init__.py:
 
 app.py:
 from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
@@ -2780,43 +2938,4 @@ async def download_full_report(
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="refassist_report.zip"'}
     )
-
-
-# Legacy batch (kept)
-@app.post("/v1/upload")
-async def upload_references_legacy(
-    references: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None)
-):
-    refs_text: Optional[str] = (references or "").strip()
-    if (not refs_text) and file:
-        files = [file]
-        refs_text = (await _read_all(files)).strip()
-
-    if not refs_text:
-        raise HTTPException(status_code=400, detail="No references provided")
-
-    refs = split_references(refs_text)
-    if not refs:
-        raise HTTPException(status_code=400, detail="No references detected in input")
-
-    formatted_refs, report_doc = await process_references(refs)
-
-    zip_buffer = io.BytesIO()
-    with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zipf:
-        txt_content = "\n".join(f"[{i+1}] {ref}" for i, ref in enumerate(formatted_refs))
-        zipf.writestr("formatted_references.txt", txt_content)
-
-        docx_buffer = io.BytesIO()
-        report_doc.save(docx_buffer)
-        docx_buffer.seek(0)
-        zipf.writestr("report.docx", docx_buffer.read())
-
-    zip_buffer.seek(0)
-    return StreamingResponse(
-        zip_buffer,
-        media_type="application/zip",
-        headers={"Content-Disposition": 'attachment; filename="results.zip"'}
-    )
-
 

@@ -79,6 +79,28 @@ def _normalize_candidate(source: str, rec: Dict[str, Any]) -> Dict[str, Any]:
         out["volume"] = ""
         out["issue"] = ""
         out["pages"] = ""
+    elif source == "ieee":
+        # IEEE Xplore normalized mapping
+        art = rec or {}
+        out["title"] = normalize_text(art.get("title") or art.get("htmlTitle") or "")
+        # authors: list of dicts with 'full_name'
+        auths = []
+        auth_block = art.get("authors") or {}
+        for a in (auth_block.get("authors") or []):
+            nm = a.get("full_name") or a.get("preferred_name") or ""
+            nm = normalize_text(nm)
+            if nm: auths.append(nm)
+        out["authors"] = auths
+        out["journal_name"] = normalize_text(art.get("publication_title") or art.get("pub_link") or "")
+        out["journal_abbrev"] = ""
+        out["doi"] = normalize_text(art.get("doi") or "")
+        out["volume"] = normalize_text(art.get("volume") or "")
+        out["issue"]  = normalize_text(art.get("issue") or "")
+        sp = normalize_text(art.get("start_page") or "")
+        ep = normalize_text(art.get("end_page") or "")
+        out["pages"] = f"{sp}-{ep}" if sp and ep else sp
+        out["year"] = normalize_text(str(art.get("publication_year") or ""))
+        out["month"] = ""
     else:
         out.update({k: "" for k in ("title", "authors", "journal_name", "journal_abbrev", "doi", "volume", "issue", "pages", "year", "month")})
     return out
@@ -88,20 +110,15 @@ def _title_variants(title: str) -> List[str]:
     if not t:
         return []
     out = [t]
-    # remove subtitle after colon/dash to improve recall
     m = re.split(r"\s*[:\-–—]\s*", t, maxsplit=1)
     if m and len(m[0]) >= 6:
         out.append(m[0])
-    # Shorten very long titles
     if len(t) > 180:
         out.append(t[:180])
-    # dedupe while keeping order
-    seen = set()
-    uniq = []
+    seen = set(); uniq=[]
     for v in out:
         if v not in seen:
-            seen.add(v)
-            uniq.append(v)
+            seen.add(v); uniq.append(v)
     return uniq
 
 async def multisource_lookup(state: PipelineState) -> PipelineState:

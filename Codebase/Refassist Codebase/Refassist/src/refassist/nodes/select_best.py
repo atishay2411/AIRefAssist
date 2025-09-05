@@ -18,8 +18,7 @@ def _title_sim(a: str, b: str) -> float:
 
 def _cluster_by_title(cands: List[Dict]) -> List[List[Dict]]:
     clusters: List[List[Dict]] = []
-    # tighter to avoid merging similar papers
-    THRESH = 0.90
+    THRESH = 0.92  # tighter to avoid merging similar papers
     for c in cands:
         placed = False
         for cl in clusters:
@@ -30,18 +29,23 @@ def _cluster_by_title(cands: List[Dict]) -> List[List[Dict]]:
     return clusters
 
 def _w(src: str) -> float:
-    return {"crossref":1.0,"openalex":0.8,"semanticscholar":0.6,"pubmed":0.55,"arxiv":0.4}.get((src or "").lower(), 0.2)
+    # Prioritize IEEE Xplore and Crossref in consensus voting
+    return {"ieeexplore":1.2,"crossref":1.0,"openalex":0.8,"semanticscholar":0.6,"pubmed":0.55,"arxiv":0.4}.get((src or "").lower(), 0.2)
 
 def _pages_richness(s: str) -> int:
     """
-    0 = empty/none; 1 = single numeric (e.g., '5338'); 2 = numeric range (e.g., '5338-5346')
+    0 = empty/none; 1 = single numeric; 2 = numeric range (start!=end)
     """
     if not s:
         return 0
     s2 = normalize_text(s).replace("—","-").replace("–","-")
     nums = re.findall(r"\d+", s2)
     if "-" in s2 and len(nums) >= 2:
-        return 2
+        try:
+            if int(nums[0]) != int(nums[1]):
+                return 2
+        except Exception:
+            ...
     if len(nums) == 1:
         return 1
     return 0
@@ -58,7 +62,6 @@ def _vote_field(cl: List[Dict], key: str) -> Tuple[str, float, Optional[str]]:
             source_for[v] = c.get("source")
     if not bucket: return "", 0.0, None
 
-    # Prefer richer pages value when voting for 'pages'
     if key == "pages":
         best_val, best_w = None, -1.0
         best_rich, best_len = -1, -1
@@ -68,7 +71,6 @@ def _vote_field(cl: List[Dict], key: str) -> Tuple[str, float, Optional[str]]:
                 best_val, best_w = v, w
                 best_rich, best_len = rich, len(v)
         return best_val or "", best_w, source_for.get(best_val or "")
-    # default path
     best_val, best_w = max(bucket.items(), key=lambda kv: kv[1])
     return best_val, best_w, source_for.get(best_val)
 
@@ -95,7 +97,8 @@ def _has_any_doi_agreement(cluster: List[Dict]) -> str:
     if not dois: return ""
     c = Counter(dois)
     doi, cnt = c.most_common(1)[0]
-    if cnt >= 2 or any((ci.get("source") in {"crossref","openalex"} and normalize_text(ci.get("doi")).lower().replace("doi:","")==doi) for ci in cluster):
+    # If any trusted source shares the DOI, accept
+    if cnt >= 2 or any((ci.get("source") in {"crossref","ieeexplore","openalex"} and normalize_text(ci.get("doi")).lower().replace("doi:","")==doi) for ci in cluster):
         return doi
     return ""
 
@@ -105,7 +108,7 @@ def _best_year(cl: List[Dict]) -> Tuple[str, str]:
         y = coerce_year(c.get("year","") or "")
         if not is_plausible_year(y): continue
         by_src[c.get("source","other").lower()].append(y)
-    for src in ("crossref","openalex","semanticscholar","pubmed","arxiv"):
+    for src in ("ieeexplore","crossref","openalex","semanticscholar","pubmed","arxiv"):
         ys = by_src.get(src, [])
         if ys:
             y = Counter(ys).most_common(1)[0][0]
@@ -151,7 +154,7 @@ def _consensus_record(ex: dict, candidates: List[Dict]) -> Tuple[Dict, List[str]
         v, _, src = _vote_field(top, k)
         best[k] = v; provenance[k] = src or ""
 
-    # prefer richer page ranges if the top cluster has one starting at the same first page
+    # prefer richer page ranges if top cluster has only single-page
     top_pages = best.get("pages", "")
     if _pages_richness(top_pages) == 1:
         start = re.search(r"\d+", top_pages)
@@ -181,7 +184,7 @@ def _consensus_record(ex: dict, candidates: List[Dict]) -> Tuple[Dict, List[str]
             ben = [_norm_author(a) for a in authors_to_list(bev or []) if _norm_author(a)]
             if exn and ben and exn == ben: matching_fields.append(k)
         elif k == "title":
-            if exv and bev and _title_sim(exv, bev) >= 0.90: matching_fields.append(k)
+            if exv and bev and _title_sim(exv, bev) >= 0.93: matching_fields.append(k)
         else:
             if normalize_text(str(exv or "")) == normalize_text(str(bev or "")):
                 matching_fields.append(k)
@@ -199,24 +202,42 @@ def select_best(state: PipelineState) -> PipelineState:
 
     consensus, matching_fields, prov = _consensus_record(ex, cands)
 
-    # If consensus is weak/untrusted, try best-scored or best-title but require trust
-    def _title_sim_to_ex(c): return _title_sim(ex.get("title",""), c.get("title",""))
-    if not consensus.get("title") or not is_trustworthy_match(ex, consensus):
+    # Enforce strict trust before adopting consensus:
+    #   - If consensus has DOI and it matches extracted DOI -> trust
+    #   - Else, find the *most trustworthy* single candidate and require is_trustworthy_match
+    trusted = False
+    if consensus.get("doi") and ex.get("doi"):
+        trusted = normalize_text(consensus["doi"]).lower().replace("doi:","") == normalize_text(ex["doi"]).lower().replace("doi:","")
+
+    if not trusted:
         best_scored = max(cands, key=lambda c: score_candidate(ex, c))
         if is_trustworthy_match(ex, best_scored):
             consensus2, matching_fields2, prov2 = _consensus_record(ex, [best_scored])
             consensus = consensus2 or consensus
             matching_fields = matching_fields or matching_fields2
             prov = prov or prov2
+            trusted = True
         else:
+            # One more attempt: pick the candidate with highest title sim to extracted
+            def _title_sim_to_ex(c): return _title_sim(ex.get("title",""), c.get("title",""))
             best_by_title = max(cands, key=_title_sim_to_ex)
-            if _title_sim_to_ex(best_by_title) >= 0.93 and is_trustworthy_match(ex, best_by_title):
+            if _title_sim_to_ex(best_by_title) >= 0.95 and is_trustworthy_match(ex, best_by_title):
                 consensus2, matching_fields2, prov2 = _consensus_record(ex, [best_by_title])
                 consensus = consensus2 or consensus
                 matching_fields = matching_fields or matching_fields2
                 prov = prov or prov2
+                trusted = True
+
+    # If still not trusted, **do not** override — keep minimal best so later nodes don't rewrite facts
+    if not trusted:
+        state["best"] = {}
+        state["matching_fields"] = []
+        state["provenance"] = {}
+        return state
 
     state["best"] = consensus or {}
     state["matching_fields"] = matching_fields or []
     state["provenance"] = prov or {}
     return state
+
+

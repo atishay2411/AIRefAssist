@@ -20,6 +20,10 @@ def _is_range_with_two_numbers(s: str) -> bool:
     nums = re.findall(r"\d+", s)
     return len(nums) >= 2
 
+def _first_num(s: str) -> str:
+    m = re.search(r"\d+", normalize_text(s))
+    return m.group(0) if m else ""
+
 def apply_corrections(state: PipelineState) -> PipelineState:
     ex = dict(state["extracted"])
     best = state.get("best", {}) or {}
@@ -48,7 +52,8 @@ def apply_corrections(state: PipelineState) -> PipelineState:
                 if prov.get(k):
                     audit[k] = prov.get(k)
 
-    # Special handling for 'pages': single -> full range if compatible
+    # ---------- PAGES ENRICHMENT (best -> candidates) ----------
+    # Step A: upgrade from best if compatible (existing logic)
     ex_pages = normalize_text(ex.get("pages", ""))
     be_pages = normalize_text(best.get("pages", ""))
 
@@ -61,6 +66,30 @@ def apply_corrections(state: PipelineState) -> PipelineState:
                     changes.append(("pages", ex.get("pages"), be_pages))
                     ex["pages"] = be_pages
                     audit.setdefault("pages", prov.get("pages","consensus"))
+
+    # Step B: if still single page, search ALL candidates for a richer range
+    # (useful when consensus best lacks a range but another trusted source has it)
+    ex_pages_now = normalize_text(ex.get("pages", ""))
+    if _is_single_numeric_page(ex_pages_now):
+        target_start = _extract_first_number(ex_pages_now)
+        cand_source = None
+        cand_range = None
+
+        # Candidates are already normalized in state["candidates"]
+        for c in state.get("candidates", []) or []:
+            cp = normalize_text(c.get("pages",""))
+            if _is_range_with_two_numbers(cp):
+                cstart = _extract_first_number(cp)
+                if cstart and target_start and cstart == target_start:
+                    # Prefer the longest string (most detail) among matches
+                    if not cand_range or len(cp) > len(cand_range):
+                        cand_range = cp
+                        cand_source = c.get("source") or "candidates"
+
+        if cand_range and cand_range != ex_pages_now:
+            changes.append(("pages", ex.get("pages"), cand_range))
+            ex["pages"] = cand_range
+            audit.setdefault("pages", cand_source or "candidates")
 
     # Suggestions on top
     for k, v in suggestions.items():
