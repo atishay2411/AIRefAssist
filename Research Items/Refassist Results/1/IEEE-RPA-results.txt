@@ -1,1 +1,0 @@
-F.-J. Lin, P.-H. Shen, S.-L. Yang, and P. H. Chou, “Recurrent radial basis function network-based fuzzy neural network control for permanent- magnet linear synchronous motor servo drive,” IEEE Trans. Magn., vol. 42, no. 11, p. •••, Nov. 2006. DOI: 10.1109/TMAG.2006.880995

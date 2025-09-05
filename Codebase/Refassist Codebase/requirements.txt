@@ -1,9 +1,0 @@
-langchain
-langgraph
-langchain_community
-openai
-uvicorn 
-fastapi
-python-multipart
-python-docx
--e refassist
