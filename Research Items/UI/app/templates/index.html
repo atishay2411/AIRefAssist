@@ -1,0 +1,48 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>IEEE VS AI</title>
+    <link rel="stylesheet" href="{{ url_for('static', path='css/styles.css') }}">
+</head>
+<body>
+    <header class="header-bar">
+        <nav>
+            <a href="#">IEEE.org</a>
+            <a href="#">IEEE Xplore Digital Library</a>
+            <a href="#">IEEE Standards</a>
+            <a href="#">IEEE Spectrum</a>
+            <a href="#">IEEE Author Center</a>
+        </nav>
+    </header>
+
+    <main class="main-content">
+        <h1>RefAssist VS AI 😊</h1>
+        <div class="content-box">
+            <div class="left-panel">
+                <h2>Improve your references before submitting your article for peer review.</h2>
+                <p>Receive a correctly formatted reference list in IEEE style by pasting your references or uploading your references or article. The following file formats can be uploaded:</p>
+                <ul>
+                    <li>Word: .docx, .doc</li>
+                    <li>LaTeX: .tex, .bbl (in UTF-8 format)</li>
+                    <li>Text: .txt (in UTF-8 format)</li>
+                </ul>
+                <p>For best results, each reference should be numbered and separated by a line break.</p>
+                <p>You will receive a ZIP package containing your corrected references plus a report with notes and recommended steps. You can download this ZIP package or have it emailed.</p>
+            </div>
+
+            <div class="right-panel">
+                <label for="references"><strong>Copy and paste text</strong></label>
+                <textarea id="references" rows="15" placeholder=""></textarea>
+
+                <div class="upload-section">
+                    <p><strong>OR</strong></p>
+                    <p><a href="#">Upload</a> your references or your entire article. You may also drag and drop a file anywhere on this page.</p>
+                </div>
+
+                <button disabled id="check-btn">CHECK YOUR REFERENCES</button>
+            </div>
+        </div>
+    </main>
+</body>
+</html>

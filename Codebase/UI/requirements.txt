@@ -1,0 +1,3 @@
+fastapi[all] 
+jinja2
+python-multipart
