@@ -12,3 +12,11 @@ def should_exit(state: PipelineState) -> bool:
 
 def route_after_verify(state: PipelineState) -> str:
     return "FormatReference" if should_exit(state) else "ApplyCorrections"
+
+
+# Only verify journal abbreviations for journal or conference references
+def _route_after_parse(s: PipelineState) -> str:
+    rtype = (s.get("type") or "").lower()
+    if rtype in ("journal", "journal article", "conference paper"):
+        return "VerifyJournalAbbrev"
+    return "MultiSourceLookup"

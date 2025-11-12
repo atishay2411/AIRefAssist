@@ -6,4 +6,9 @@ uvicorn
 fastapi
 python-multipart
 python-docx
+langchain_openai
+pypdf
+faiss-cpu
+langchain_chroma
+ipython
 -e refassist

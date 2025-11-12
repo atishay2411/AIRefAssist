@@ -1,83 +1,135 @@
-import re
-from ..state import PipelineState
-from ..tools.utils import normalize_text
+from __future__ import annotations
+import os
+from typing import Dict, Any
+from dotenv import load_dotenv, find_dotenv
+from langchain_openai import AzureChatOpenAI
 
-IEEE_HINT = (
-    "You are a precise IEEE reference formatter. "
-    "Format a single reference in IEEE style using ONLY the provided fields. "
-    "Do NOT invent or modify facts. If a field is missing, omit it. "
-    "Output must be a single formatted reference line (no JSON, no commentary). "
-    "Use italics with *asterisks* around container titles if present. "
-    "Authors rule (IEEE reference list): list all authors if there are up to six. "
-    "If there are seven or more authors, list only the first author followed by *et al.* "
-    "Always include full page ranges if available (e.g., pp. 5338–5346); if only one page is present, use 'p. N'. "
-    "Do NOT guess missing pages."
+from ..rag.service import (
+    StyleGuideConfig,
+    StyleGuideRAGService,
+    build_query_from_state
 )
 
-def _is_reasonable(ref: str) -> bool:
-    if not ref or len(ref) < 20:
-        return False
-    return ("\"" in ref) or ("*") in ref or ("doi.org/" in ref) or ("http" in ref)
+# ---------------------------------------------------------------------
+# Load environment
+# ---------------------------------------------------------------------
+load_dotenv(find_dotenv(), override=True)
 
-def _safe_line(s: str) -> str:
-    s = s.strip()
-    s = re.sub(r"\s+", " ", s)
-    if s and not s.endswith("."):
-        s += "."
-    return s
+# ---------------------------------------------------------------------
+# System prompt for IEEE reference formatting
+# ---------------------------------------------------------------------
+SYSTEM_PROMPT = """You are an expert IEEE reference formatter.
+Your task is to generate an EXACT IEEE-style reference for the given metadata.
 
-def _normalize_pages_field(pages: str) -> str:
-    pages = (pages or "").strip()
-    if not pages:
-        return ""
-    nums = re.findall(r"\d+", pages)
-    if len(nums) == 2:
-        return f"{nums[0]}–{nums[1]}"
-    if len(nums) == 1:
-        return nums[0]
-    return pages
+Follow the IEEE Editorial Style Manual exactly and only use the retrieved style guide snippets.
+Do not invent or hallucinate missing data.
+If a field is missing, omit it gracefully.
 
-def _post_sanitize(s: str) -> str:
-    s = re.sub(r"\s+,", ",", s)
-    s = re.sub(r"\s+\.", ".", s)
-    s = re.sub(r"\bpp\.\s*(?=[,\.](?:\s|$))", "", s)
-    s = re.sub(r"\bpp\.\s*(\d+)[\s,]+(\d+)", r"pp. \1–\2", s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
+Formatting rules:
+- For authors:
+  * Up to six authors: list all.
+  * Seven or more: list first author followed by “et al.”
+  * Use initials for given and middle names (F.M. Lastname).
+  * Include middle initials if available; do not omit them.
+  * Preserve non-Western name order and compound surnames (e.g., “van der Waals”).
+  * Separate multiple authors with commas, and before the last author use “and”.
+  * No spaces between initials (e.g., “F.M.” not “F. M.”).
+- Page numbers:
+  * Multiple pages → “pp.”
+  * Single page → “p.”
+- Include DOI or URL only if provided.
+- Respect capitalization, punctuation, and italicization.
 
-async def llm_format(state: PipelineState) -> PipelineState:
-    llm = state.get("_llm")
-    ex = state.get("extracted", {}) or {}
-    rtype = normalize_text(state.get("type") or "other")
+For titles:
+- Apply correct IEEE title casing (capitalize major words, keep acronyms uppercase).
+- Preserve acronyms (AI, IEEE, DNA, GPT-5, etc.) and chemical or mathematical symbols.
+- Never translate, shorten, or rephrase titles — only fix casing and punctuation.
+- If a title already appears correctly formatted, keep it as-is.
 
-    if not llm:
-        return state
+Use '*' for italics and '**' for bold text.
+Never include reasoning, explanations, or intermediate steps.
+Return only the final formatted IEEE reference as a single line.
+"""
 
-    if "pages" in ex and ex["pages"]:
-        ex["pages"] = _normalize_pages_field(str(ex["pages"]))
+# ---------------------------------------------------------------------
+# Main IEEE formatter using RAG
+# ---------------------------------------------------------------------
+async def llm_format(state: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Formats a reference using IEEE style.
+    Uses Azure OpenAI LLM + RAG retrieval from StyleGuideRAGService.
+    """
 
-    payload_lines = [f"type: {rtype}"]
-    for k in (
-        "title","authors","journal_name","journal_abbrev","conference_name",
-        "volume","issue","pages","year","month","doi","publisher","location","edition","isbn","url"
-    ):
-        v = ex.get(k)
-        if v is None or v == "":
-            continue
-        if isinstance(v, list):
-            payload_lines.append(f"{k}: {', '.join([str(x) for x in v])}")
-        else:
-            payload_lines.append(f"{k}: {v}")
+    # --- Initialize RAG service ---
+    cfg = StyleGuideConfig.from_env()
+    rag_service = StyleGuideRAGService(cfg)
 
-    user_payload = "\n".join(payload_lines)
-    prompt = (
-        f"{IEEE_HINT}\n\n"
-        f"Fields to use (authoritative; do not change values):\n{user_payload}\n\n"
-        "Return exactly one IEEE-formatted reference line, nothing else."
+    # --- Build query from pipeline state ---
+    query = build_query_from_state(state)
+    snippets = rag_service.retrieve_snippets(query)
+
+    # --- Construct context block ---
+    context_block = "IEEE STYLE GUIDE EXCERPTS:\n" + "\n\n".join(
+        f"[{s['rank']}] {s['text']}" for s in snippets
     )
 
-    out_text = (await llm.text(prompt)).strip() if hasattr(llm, "text") else ""
-    if _is_reasonable(out_text):
-        cleaned = _post_sanitize(_safe_line(out_text))
-        state["formatted"] = _safe_line(cleaned)
+    # --- Prepare input data for formatting ---
+    rtype = (state.get("type") or "unknown").lower()
+    extracted = state.get("extracted") or {}
+    corrected = state.get("corrected_entities") or {}
+
+    # Merge corrected fields (from LLM correction) into extracted ones
+    merged_fields = {**extracted, **corrected}
+    fields_text = "\n".join(f"{k}: {v}" for k, v in merged_fields.items() if v)
+
+    # --- Print BEFORE sending to LLM - For logging in terminal ---
+    print("\n" + "=" * 80)
+    print("[FORMAT BEFORE] Preparing to format reference")
+    print("- Reference type:", rtype.upper())
+    print("- Metadata to format (excerpt):")
+    for k, v in merged_fields.items():
+        print(f"    {k}: {v}")
+    print("=" * 80 + "\n")
+
+    # --- Build user prompt ---
+    user_prompt = f"""{context_block}
+
+REFERENCE_TYPE: {rtype.upper()}
+
+METADATA FIELDS:
+{fields_text or '(none)'}
+
+Format this reference exactly per IEEE style.
+Output only the final formatted line, nothing else.
+"""
+
+    # --- Initialize Azure OpenAI LLM ---
+    llm = AzureChatOpenAI(
+        azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
+        api_key=os.getenv("AZURE_OPENAI_API_KEY"),
+        azure_deployment=os.getenv("AZURE_LLM_DEPLOYMENT", "gpt-4o-base"),
+        openai_api_version=os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-01"),
+        temperature=0.0,
+    )
+
+    # --- Invoke LLM with system + user messages ---
+    messages = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    response = await llm.ainvoke(messages)
+    formatted = response.content.strip()
+
+    # --- Print AFTER receiving LLM output ---
+    print("\n" + "=" * 80)
+    print("[FORMAT AFTER] LLM returned formatted reference:")
+    print(formatted)
+    print("=" * 80 + "\n")
+
+    # --- Store back to pipeline state ---
+    state["style_snippets"] = [s["text"] for s in snippets]
+    state["formatted"] = formatted
+    state["style_query"] = query
+
     return state

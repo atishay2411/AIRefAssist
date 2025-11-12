@@ -64,16 +64,26 @@ def format_reference(state: PipelineState) -> PipelineState:
         if imprint: parts.append(imprint)
         if year: parts.append(year)
         if isbn: parts.append(f"ISBN: {isbn}")
-        if doi_link: parts.append(doi_link)
+        # Drop chapter-like pages on books
+        if not re.search(r'\d+\s*[-–—]\s*\d+', ex.get("pages") or "") and doi_link:
+            parts.append(doi_link)
+
 
     elif rtype in ("book chapter","chapter"):
         book_title = (ex.get("book_title") or conf or journal or "").strip()
+        editors = authors_to_list(ex.get("editors") or [])
+        editors_fmt = format_authors_ieee_list(editors).replace(" and ", ", ")  # list only, no "and" for editors
+        ed_label = "Ed." if len(editors) == 1 else "Eds." if editors else ""
         if book_title: parts.append(f"in *{book_title}*")
+        if editors:
+            parts.append(f"{editors_fmt}, {ed_label}".strip(", "))
+        imprint_bits = [loc, pub] = [(ex.get("location") or "").strip(), (ex.get("publisher") or "").strip()]
+        imprint = ": ".join([b for b in imprint_bits if b]) if any(imprint_bits) else ""
+        if imprint: parts.append(imprint)
+        if year: parts.append(year)
         if pages_norm: parts.append(f"pp. {pages_norm}")
-        if pub: parts.append(pub)
-        date = " ".join([m for m in [month_disp, year] if m]).strip()
-        if date: parts.append(date)
         if doi_link: parts.append(doi_link)
+
 
     else:
         venue = journal or conf or pub
@@ -87,3 +97,6 @@ def format_reference(state: PipelineState) -> PipelineState:
 
     state["formatted"] = (", ".join([p for p in parts if p]) + ".").replace(" ,", ",")
     return state
+
+
+

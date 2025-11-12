@@ -1,29 +1,44 @@
 from typing import Any, Dict, List, Optional
 from ..http import SourceClient
+from ..utils import is_plausible_year
 
 class CrossrefClient(SourceClient):
-    NAME = "crossref"; BASE_URL = "https://api.crossref.org/works"
+    NAME = "crossref"
+    BASE = "https://api.crossref.org/works"
 
-    async def by_doi(self, doi: str) -> Optional[Dict[str, Any]]:
-        key = f"doi:{doi.lower().strip()}"
-        if (c := self._cache_get(key)): return c
-        try:
-            data = await self._get_json(f"{self.BASE_URL}/{doi}")
-            msg = data.get("message")
-            if msg: self._cache_set(key, msg)
-            return msg
-        except Exception: return None
+    _SELECT = (
+        "title,author,container-title,short-container-title,"
+        "issued,DOI,page,volume,issue,published-print,published-online,created,deposited,type"
+    )
 
-    async def by_title(self, title: str) -> Optional[List[Dict[str, Any]]]:
-        key = f"title:{title.lower()}"
+    async def by_title(self, title: str, rows: int = 5) -> List[Dict[str, Any]]:
         params = {
             "query.title": title,
-            "rows": 5,
-            "select": "title,author,container-title,short-container-title,issued,DOI,page,volume,issue,published-print,published-online,type"
+            "rows": rows,
+            "select": self._SELECT,
         }
-        try:
-            data = await self._get_json(self.BASE_URL, params=params)
-            items = data.get("message", {}).get("items", [])[:5]
-            if items: self._cache_set(key, items[0])
-            return items
-        except Exception: return None
+        data = await self._get_json(self.BASE, params=params)
+        items = (data or {}).get("message", {}).get("items", []) or []
+        out = []
+        for it in items:
+            # Best-effort year extraction here so logs show something meaningful
+            y = None
+            for key in ("published-print", "published-online", "issued", "created", "deposited"):
+                dp = (it.get(key) or {}).get("date-parts") or []
+                if dp and dp[0]:
+                    y = str(dp[0][0]); break
+            y = y if is_plausible_year(y or "") else ""
+            t = (it.get("title") or [""])[0] if it.get("title") else ""
+            typ = it.get("type")
+            if y:
+                print(f"[CrossrefClient] OK: Year={y} Type={typ} for title='{t[:60]}...'")
+            else:
+                print(f"[CrossrefClient] WARN: No plausible year found for title='{t[:60]}...'")
+            out.append(it)
+        return out
+
+    async def by_doi(self, doi: str) -> Optional[Dict[str, Any]]:
+        url = f"{self.BASE}/{doi}"
+        params = {"select": self._SELECT}
+        data = await self._get_json(url, params=params)
+        return (data or {}).get("message") or None

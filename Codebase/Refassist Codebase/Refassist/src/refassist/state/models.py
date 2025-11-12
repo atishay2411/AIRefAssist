@@ -27,6 +27,9 @@ class ExtractedModel(BaseModel):
     isbn: Optional[str] = None
     url: Optional[str] = None
     arxiv_id: Optional[str] = None
+    book_title: Optional[str] = None      # container title for chapters
+    editors: Optional[List[str]] = None   # list of editor names
+
 
 class PipelineState(TypedDict, total=False):
     reference: str
