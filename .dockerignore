@@ -1,0 +1,21 @@
+# Keep the ACR build-upload context small: only what the Dockerfile COPYs matters.
+.venv/
+.git/
+.github/
+.claude/
+.DS_Store
+**/.DS_Store
+*.zip
+archive/
+research/
+.chroma_ieee_style/
+.rw_cache/
+outputs/
+exports/
+web/node_modules/
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.env
+.env.*
+tests/

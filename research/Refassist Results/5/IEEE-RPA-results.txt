@@ -1,0 +1,1 @@
+I. Rodriguez and J. L. Munoz, “Benchmark of COMSOL vs. ROXIE Codes for the Calculation of a Particle Accelerator Quadrupole,” Excerpt from the Proceedings of the 2011 COMSOL Conference in Stuttgart, https://www.comsol.com/paper/download/83731/rodriguez_paper.pdf Downloaded August 2016.

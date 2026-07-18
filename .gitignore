@@ -205,3 +205,34 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# ---------------------------------------------------------------
+# RefAssist project-specific
+# ---------------------------------------------------------------
+
+# Secrets — copy refassist/.env.example to refassist/.env locally
+*.env
+!.env.example
+
+# Generated artifacts
+.chroma_ieee_style/
+outputs/
+exports/
+archive/
+
+# Retraction Watch dataset cache
+.rw_cache/
+
+# Archives that shouldn't live in git
+*.zip
+
+# Office lock files
+~$*
+
+# Internal business material — never publish
+AIRefAssist-Cost-Model.xlsx
+*Cost-Model*
+
+# Local tooling / OS noise
+.claude/
+.DS_Store
